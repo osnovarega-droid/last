@@ -1,0 +1,33 @@
+```
+💎 Goose Panel 💎
+
+🗓 PERIOD: 18/02/2026 - 25/02/2026
+
+Accounts: 45
+
+Case                               | Amount | % of drops
+-----------------------------------+--------+-----------
+Revolution Case                    | 11     | 24.4
+Recoil Case                        | 9      | 20.0
+Sealed Genesis Terminal            | 9      | 20.0
+Dreams & Nightmares Case           | 8      | 17.8
+Kilowatt Case                      | 8      | 17.8
+-----------------------------------+--------+-----------
+
+(Top 10 skins)                     | Amount | Price $
+-----------------------------------+--------+--------
+Desert Eagle | Mulberry (Battle... | 1      | 5.44
+MP9 | Shredded (Factory New)       | 1      | 2.60
+-----------------------------------+--------+--------
+
+➙ Price of all drop: ~ 37.59$.
+➙ Total cases: 45 pcs.
+➙ AVG price of cases/all drop: 0.61$/0.84$.
+
+another drop:
+- 730-FBI | 3 | 0.05$
+- 730-SWAT | 3 | 0.05$
+- 730-Balkan | 2 | 0.05$
+- 730-IDF | 1 | 0.04$
+➙ Price of another drop: ~ 0.44$.
+```

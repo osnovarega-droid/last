@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 3,
+  "periodStart": "2026-02-17T21:00:00.000Z",
+  "periodEnd": "2026-02-24T21:00:00.000Z",
+  "accounts": {
+    "csdrop_master": true,
+    "smokepeek_3k": true,
+    "glitch_boi777": true,
+    "ShadowFury_89": true,
+    "CryoZenix_901": true,
+    "EchoByte_321": true,
+    "NeonWolf_47x": true,
+    "NovaCircuit14": true,
+    "QuantumRiftX1": true,
+    "vault_rider_07": true,
+    "SilentNova771": true,
+    "VortexFuse15": true,
+    "arcanerunner2003": true,
+    "boosted_raccoon": true,
+    "byte_stalker41": true,
+    "clutchKing_31": true,
+    "danix22s1": true,
+    "darkforge_zx": true,
+    "frostblade0312": true,
+    "glitchraven8": true,
+    "oleg_smirnofff3131": true,
+    "pixelhunter221": true,
+    "shadowcrypt94": true,
+    "steelnexus11": true,
+    "battlezone_dan": true,
+    "PixelNomadX3": true,
+    "NovaStrike777": true,
+    "cs2_elite2025": true,
+    "maria_sokolova99s": true,
+    "toxic_sniper132": true,
+    "sergey_kuznetsov13": true,
+    "alina_petrova93": true,
+    "elena_volkova1990": true,
+    "irina_zaitseva84": true,
+    "nikita_fedorov33": true,
+    "oleg_morozov91": true,
+    "tatiana_belova19": true,
+    "valeriyKozakov86": true,
+    "prokofievv192": true,
+    "RomanShurpatov": true,
+    "ValeriyTomof3": true,
+    "lololup52": true,
+    "BurebisstaMarius": true,
+    "Cuppidon1998": true,
+    "mr_cody99": true
+  },
+  "cases": {
+    "Sealed Genesis Terminal": {
+      "amount": 9,
+      "totalPrice": 2.45,
+      "lastPriceText": "$0.28",
+      "pricedCount": 9
+    },
+    "Kilowatt Case": {
+      "amount": 8,
+      "totalPrice": 4.41,
+      "lastPriceText": "$0.28",
+      "pricedCount": 8
+    },
+    "Revolution Case": {
+      "amount": 11,
+      "totalPrice": 3.7399999999999993,
+      "lastPriceText": "$0.34",
+      "pricedCount": 11
+    },
+    "Dreams & Nightmares Case": {
+      "amount": 8,
+      "totalPrice": 13.739999999999998,
+      "lastPriceText": "$1.70",
+      "pricedCount": 8
+    },
+    "Recoil Case": {
+      "amount": 9,
+      "totalPrice": 2.94,
+      "lastPriceText": "$0.34",
+      "pricedCount": 9
+    }
+  },
+  "skins": {
+    "Desert Eagle | Mulberry (Battle-Scarred)": {
+      "amount": 1,
+      "totalPrice": 5.44,
+      "lastPriceText": "$5.44",
+      "pricedCount": 1
+    },
+    "MP9 | Shredded (Factory New)": {
+      "amount": 1,
+      "totalPrice": 2.6,
+      "lastPriceText": "$2.60",
+      "pricedCount": 1
+    }
+  },
+  "anotherDrops": {
+    "730-IDF": {
+      "amount": 1,
+      "totalPrice": 0.04,
+      "lastPriceText": "$0.04",
+      "pricedCount": 1
+    },
+    "730-FBI": {
+      "amount": 3,
+      "totalPrice": 0.15000000000000002,
+      "lastPriceText": "$0.05",
+      "pricedCount": 3
+    },
+    "730-Balkan": {
+      "amount": 2,
+      "totalPrice": 0.1,
+      "lastPriceText": "$0.05",
+      "pricedCount": 2
+    },
+    "730-SWAT": {
+      "amount": 3,
+      "totalPrice": 0.15000000000000002,
+      "lastPriceText": "$0.05",
+      "pricedCount": 3
+    }
+  },
+  "totalCs2Drops": 90,
+  "totalCs2DropValue": 37.59000000000004,
+  "totalCases": 45,
+  "totalCaseValue": 27.279999999999998,
+  "totalSkins": 2,
+  "totalSkinValue": 8.040000000000001,
+  "totalAllSkins": 45,
+  "totalAllSkinValue": 10.309999999999997,
+  "totalAnotherDrops": 9,
+  "totalAnotherDropValue": 0.43999999999999995
+}
