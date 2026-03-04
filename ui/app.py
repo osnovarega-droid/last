@@ -146,7 +146,7 @@ class SteamRouteManager:
 class App(customtkinter.CTk):
     def __init__(self, gsi_manager=None, startup_gpu_info=None):
         super().__init__()
-        self.title("Goose Panel | v.4.0.2")
+        self.title("Goose Panel | v.4.0.3")
         self.gsi_manager = gsi_manager
         self.window_position_file = Path("window_position.txt")
         self.executor = ThreadPoolExecutor(max_workers=8)
@@ -165,6 +165,7 @@ class App(customtkinter.CTk):
         self._license_check_in_flight = False
 
         self.http_session = requests.Session()
+        self.http_session.trust_env = False  # игнорировать системные прокси/ENV (очень часто именно они ломают)
         self.http_session.verify = True  # для http:// не влияет, но не мешает
 
         self.geometry("1100x600")
@@ -230,15 +231,24 @@ class App(customtkinter.CTk):
             pass
 
     def _run_action_async(self, fn, done_callback=None):
-        future = self.executor.submit(fn)
+        try:
+            future = self.executor.submit(fn)
+        except Exception as exc:
+            if self.winfo_exists():
+                self.after(0, lambda: self.log_manager.add_log(f"❌ executor.submit failed: {exc}"))
+            raise
 
         def on_done(done_future):
             if not self.winfo_exists():
                 return
             if done_callback:
-                self.after(0, lambda: done_callback(done_future))
+                try:
+                    self.after(0, lambda: done_callback(done_future))
+                except Exception as exc:
+                    self.after(0, lambda: self.log_manager.add_log(f"❌ done_callback scheduling failed: {exc}"))
 
         future.add_done_callback(on_done)
+        return future
 
     def _safe_ui_refresh(self):
         if not self.winfo_exists():
@@ -285,7 +295,7 @@ class App(customtkinter.CTk):
 
         customtkinter.CTkLabel(
             self.sidebar,
-            text="Goose Panel",
+            text="    Goose Panel  ",
             font=customtkinter.CTkFont(size=20, weight="bold"),
             text_color=TXT_MAIN,
         ).grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
@@ -1001,9 +1011,16 @@ class App(customtkinter.CTk):
             return False
 
     def _request_license_challenge(self, hwid):
+        # ВАЖНО: на сервере роут без trailing slash: /api/challenge
         url = f"{LICENSE_SERVER_URL}/api/challenge"
-        response = self.http_session.get(url, params={"hwid": hwid, "ts": int(time.time())}, timeout=8)
+
+        response = self.http_session.get(
+            url,
+            params={"hwid": hwid},
+            timeout=(3, 8),
+        )
         response.raise_for_status()
+
         data = response.json()
         if not isinstance(data, dict):
             raise ValueError("Некорректный challenge от сервера")
@@ -1011,40 +1028,43 @@ class App(customtkinter.CTk):
         nonce = data.get("nonce")
         challenge_id = data.get("challenge_id")
         expires_in = int(data.get("expires_in", LICENSE_CHALLENGE_TTL_SECONDS))
+
         if not nonce or not challenge_id:
-            raise ValueError("Сервер не вернул nonce/challenge_id")
+            raise ValueError(f"Сервер не вернул nonce/challenge_id. Ответ: {data}")
 
         self.license_nonce = nonce
         self.license_challenge_id = challenge_id
         self.license_challenge_exp = int(time.time()) + min(expires_in, LICENSE_CHALLENGE_TTL_SECONDS)
+
         return {"nonce": nonce, "challenge_id": challenge_id}
 
-    def _request_license_state(self, hwid):
-        if LICENSE_SERVER_URL.lower().startswith("http://"):
-            self.log_manager.add_log("⚠️ LICENSE_SERVER_URL использует HTTP (без TLS). Используется защита подписью RSA.")
 
+    def _request_license_state(self, hwid):
+        # 1) получить challenge
         challenge = self._request_license_challenge(hwid)
+
+        # 2) POST /api/check с JSON body (как в серверном CheckRequest)
         url = f"{LICENSE_SERVER_URL}/api/check"
-        response = self.http_session.post(
-            url,
-            json={
-                "hwid": hwid,
-                "challenge_id": challenge["challenge_id"],
-                "nonce": challenge["nonce"],
-                "ts": int(time.time()),
-            },
-            timeout=8,
-        )
+        body = {
+            "hwid": hwid,
+            "challenge_id": challenge["challenge_id"],
+            "nonce": challenge["nonce"],
+            "ts": int(time.time()),
+        }
+
+        response = self.http_session.post(url, json=body, timeout=(3, 8))
         response.raise_for_status()
+
         data = response.json()
         if not isinstance(data, dict):
             raise ValueError("Некорректный ответ сервера лицензий")
 
-        signed_token = data.get("signed_token") or data.get("token")
-        if signed_token:
-            return self._verify_signed_token(signed_token, hwid, challenge["nonce"])
+        signed_token = data.get("signed_token")
+        if not signed_token:
+            raise ValueError(data.get("detail") or data.get("message") or f"Сервер не вернул signed_token. Ответ: {data}")
 
-        raise ValueError(data.get("message") or "Сервер не вернул signed_token")
+        # Сервер всегда возвращает подписанный токен (signed_token) в этом коде:
+        return self._verify_signed_token(signed_token, hwid, expected_nonce=challenge["nonce"])
 
     def _verify_signed_token(self, signed_token, expected_hwid, expected_nonce=None):
         if not signed_token or "." not in signed_token:
@@ -1091,44 +1111,95 @@ class App(customtkinter.CTk):
         return int(time.time()) < int(self.license_exp) - LICENSE_TOKEN_TTL_GRACE_SECONDS
 
     def check_license_async(self, hwid):
+        # если уже идёт проверка — НЕ молчим
         if self._license_check_in_flight:
+            self.log_manager.add_log("⏳ Проверка лицензии уже выполняется...")
+            try:
+                self.license_status.configure(text="Статус: Проверка уже идёт...", text_color=ACCENT_ORANGE)
+            except Exception:
+                pass
             return
+
         self._license_check_in_flight = True
+
         self.log_manager.add_log(f"🔄 Проверка лицензии: {hwid}...")
         try:
             self.license_status.configure(text="Статус: Проверка...", text_color=ACCENT_ORANGE)
         except Exception:
             pass
-        self.executor.submit(self._do_check_request, hwid)
 
-    def _do_check_request(self, hwid):
+        # watchdog: если что-то пошло не так и future не вернулось — сбросим флаг
+        watchdog_id = None
+
+        def watchdog():
+            # если спустя 15с всё ещё "in flight" — сбрасываем и логируем
+            if self._license_check_in_flight and self.winfo_exists():
+                self._license_check_in_flight = False
+                self.log_manager.add_log("⚠️ Проверка лицензии зависла/не вернулась. Флаг сброшен, попробуйте ещё раз.")
+                try:
+                    self.license_status.configure(text="Статус: Таймаут проверки", text_color=ACCENT_RED)
+                except Exception:
+                    pass
+
+        if self.winfo_exists():
+            watchdog_id = self.after(15000, watchdog)
+
+        def task():
+            return self._request_license_state(hwid)
+
+        def done(fut):
+            nonlocal watchdog_id
+            try:
+                if watchdog_id is not None and self.winfo_exists():
+                    try:
+                        self.after_cancel(watchdog_id)
+                    except Exception:
+                        pass
+
+                payload = fut.result()
+                msg = f"Активна до {payload.get('expires_at', 'n/a')}"
+                self._apply_license_result(True, msg)
+
+            except Exception as exc:
+                self._apply_license_result(False, f"Проверка не пройдена: {exc}")
+
+            finally:
+                self._license_check_in_flight = False
+
+        # важно: если executor.submit упал — тоже сбросить флаг
         try:
-            payload = self._request_license_state(hwid)
-            msg = f"Активна до {payload.get('expires_at', 'n/a')}"
-            self._queue_ui_action(lambda: self._apply_license_result(True, msg))
+            self._run_action_async(task, done)
         except Exception as exc:
-            self._queue_ui_action(lambda: self._apply_license_result(False, f"Проверка не пройдена: {exc}"))
-        finally:
-            self._queue_ui_action(lambda: setattr(self, "_license_check_in_flight", False))
+            if watchdog_id is not None and self.winfo_exists():
+                try:
+                    self.after_cancel(watchdog_id)
+                except Exception:
+                    pass
+            self._license_check_in_flight = False
+            self.log_manager.add_log(f"❌ Не удалось запустить проверку в фоне: {exc}")
+            try:
+                self.license_status.configure(text="Статус: Ошибка запуска проверки", text_color=ACCENT_RED)
+            except Exception:
+                pass
 
     def _start_background_check(self):
         if getattr(self, "is_unlocked", False):
             my_hwid = self.get_hwid()
-            self.executor.submit(self._do_silent_check, my_hwid)
+            self._run_action_async(lambda: self._do_silent_check(my_hwid), self._on_silent_check_done)
 
         if self.winfo_exists():
             self.after(15000, self._start_background_check)
 
     def _do_silent_check(self, hwid):
-        try:
-            if self._validate_current_token():
-                return
-            self._request_license_state(hwid)
-        except Exception:
-            if self.is_unlocked:
-                self._queue_ui_action(lambda: self._apply_license_result(False, "Сеанс лицензии истёк/отозван"))
-                self._queue_ui_action(lambda: self.log_manager.add_log("⚠️ Сеанс прерван: нужна повторная серверная валидация лицензии."))
+        if self._validate_current_token():
+            return
+        self._request_license_state(hwid)
 
+    def _on_silent_check_done(self, future):
+        if future.exception() and self.is_unlocked:
+            self._apply_license_result(False, "Сеанс лицензии истёк/отозван")
+            self.log_manager.add_log("⚠️ Сеанс прерван: нужна повторная серверная валидация лицензии.")
+            
     def _ensure_license(self):
         if not self.is_unlocked:
             try:
