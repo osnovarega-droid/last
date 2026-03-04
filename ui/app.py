@@ -6,7 +6,10 @@ import subprocess
 import uuid
 import hashlib
 import sys
-
+import base64
+import secrets
+import time
+import rsa
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -39,6 +42,11 @@ ACCENT_GREEN = "#1f9d55"
 ACCENT_RED = "#c83a4a"
 ACCENT_PURPLE = "#252b4f"
 ACCENT_ORANGE = "#ff9500"
+
+LICENSE_SERVER_URL = "http://77.91.96.154"
+LICENSE_PUBLIC_KEY_PATH = Path("settings/license_public_key.pem")
+LICENSE_TOKEN_TTL_GRACE_SECONDS = 5
+LEGACY_LICENSE_TTL_SECONDS = 30
 
 REGION_PING_TARGETS = {}
 WEEKLY_RESET_WEEKDAY = 2  # Wednesday
@@ -136,6 +144,12 @@ class App(customtkinter.CTk):
         self._pending_section = None
         self._section_switch_job = None
         self.is_unlocked = False
+        self.license_token = None
+        self.license_exp = 0
+        self.license_nonce = None
+        self._license_check_in_flight = False
+        self.http_session = requests.Session()
+        self.http_session.verify = True
         
         self.geometry("1100x600")
         self.minsize(1100, 600)
@@ -874,27 +888,103 @@ class App(customtkinter.CTk):
         mac = uuid.getnode()
         return hashlib.sha256(str(mac).encode("utf-8")).hexdigest()[:20].upper()
 
+    def _urlsafe_b64decode(self, value):
+        padding = '=' * ((4 - len(value) % 4) % 4)
+        return base64.urlsafe_b64decode((value + padding).encode('utf-8'))
+
+    def _load_public_key(self):
+        try:
+            if not LICENSE_PUBLIC_KEY_PATH.exists():
+                return None
+            return rsa.PublicKey.load_pkcs1(LICENSE_PUBLIC_KEY_PATH.read_bytes())
+        except Exception:
+            return None
+
+    def _verify_signed_token(self, signed_token, expected_hwid, expected_nonce=None):
+        if not signed_token or '.' not in signed_token:
+            raise ValueError('Подпись лицензии отсутствует')
+
+        payload_b64, signature_b64 = signed_token.split('.', 1)
+        payload_raw = self._urlsafe_b64decode(payload_b64)
+        signature = self._urlsafe_b64decode(signature_b64)
+
+        public_key = self._load_public_key()
+        if public_key is None:
+            raise ValueError('Отсутствует settings/license_public_key.pem для проверки подписи')
+
+        try:
+            rsa.verify(payload_raw, signature, public_key)
+        except Exception as exc:
+            raise ValueError(f'Подпись сервера не прошла проверку: {exc}') from exc
+
+        payload = json.loads(payload_raw.decode('utf-8'))
+        now_ts = int(time.time())
+        iat = int(payload.get('iat', 0))
+        exp = int(payload.get('exp', 0))
+
+        if payload.get('hwid') != expected_hwid:
+            raise ValueError('HWID в токене не совпадает с устройством')
+        if expected_nonce and payload.get('nonce') != expected_nonce:
+            raise ValueError('Nonce в токене не совпадает с запросом')
+        if iat > now_ts + LICENSE_TOKEN_TTL_GRACE_SECONDS:
+            raise ValueError('Токен имеет некорректный iat')
+        if exp <= now_ts:
+            raise ValueError('Токен лицензии истёк')
+        if payload.get('status') != 'active':
+            raise ValueError(payload.get('message') or 'Лицензия не активна')
+
+        self.license_token = signed_token
+        self.license_exp = exp
+        self.license_nonce = payload.get('nonce')
+        return payload
+
+    def _request_license_state(self, hwid):
+        url = f"{LICENSE_SERVER_URL}/api/check"
+        response = self.http_session.get(url, params={'hwid': hwid, 'ts': int(time.time())}, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError('Некорректный ответ сервера лицензий')
+
+        signed_token = data.get('signed_token') or data.get('token')
+        if signed_token:
+            return self._verify_signed_token(signed_token, hwid, data.get('nonce'))
+
+        if data.get('status') == 'active':
+            self.license_token = None
+            self.license_nonce = None
+            self.license_exp = int(time.time()) + LEGACY_LICENSE_TTL_SECONDS
+            return {
+                'status': 'active',
+                'expires_at': data.get('expires_at', 'n/a'),
+                'message': data.get('message', ''),
+            }
+
+        raise ValueError(data.get('message') or 'Лицензия не активна')
+
+    def _validate_current_token(self):
+        return int(time.time()) < int(self.license_exp) - LICENSE_TOKEN_TTL_GRACE_SECONDS
+
     def check_license_async(self, hwid):
+        if self._license_check_in_flight:
+            return
+        self._license_check_in_flight = True
         self.log_manager.add_log(f"🔄 Проверка лицензии: {hwid}...")
         self.license_status.configure(text="Статус: Проверка...", text_color=ACCENT_ORANGE)
         self.executor.submit(self._do_check_request, hwid)
 
+
     def _do_check_request(self, hwid):
-        server_ip = "77.91.96.154"
-        url = f"http://{server_ip}/api/check?hwid={hwid}"
+
 
         try:
-            response = requests.get(url, timeout=5)
-            data = response.json()
-
-            if data.get("status") == "active":
-                msg = f"Активна до {data.get('expires_at')}"
-                self._queue_ui_action(lambda: self._apply_license_result(True, msg))
-            else:
-                msg = data.get("message", "Ошибка лицензии")
-                self._queue_ui_action(lambda: self._apply_license_result(False, msg))
-        except Exception:
-            self._queue_ui_action(lambda: self._apply_license_result(False, "Сервер недоступен"))
+            payload = self._request_license_state(hwid)
+            msg = f"Активна до {payload.get('expires_at', 'n/a')}"
+            self._queue_ui_action(lambda: self._apply_license_result(True, msg))
+        except Exception as exc:
+            self._queue_ui_action(lambda: self._apply_license_result(False, f"Проверка не пройдена: {exc}"))
+        finally:
+            self._license_check_in_flight = False
 
     def _start_background_check(self):
         if getattr(self, "is_unlocked", False):
@@ -902,24 +992,35 @@ class App(customtkinter.CTk):
             self.executor.submit(self._do_silent_check, my_hwid)
 
         if self.winfo_exists():
-            self.after(60000, self._start_background_check)
+            self.after(15000, self._start_background_check)
 
     def _do_silent_check(self, hwid):
-        server_ip = "77.91.96.154"
-        url = f"http://{server_ip}/api/check?hwid={hwid}"
+
 
         try:
-            response = requests.get(url, timeout=5)
-            data = response.json()
+            if self._validate_current_token():
+                return
 
-            if data.get("status") != "active" and self.is_unlocked:
-                msg = data.get("message", "Лицензия отозвана")
-                self._queue_ui_action(lambda: self._apply_license_result(False, msg))
-                self._queue_ui_action(
-                    lambda: self.log_manager.add_log("⚠️ Сеанс прерван: подписка истекла или аннулирована админом.")
-                )
+            self._request_license_state(hwid)
         except Exception:
-            pass
+            if self.is_unlocked:
+                self._queue_ui_action(lambda: self._apply_license_result(False, "Сеанс лицензии истёк/отозван"))
+                self._queue_ui_action(
+                    lambda: self.log_manager.add_log("⚠️ Сеанс прерван: нужна повторная серверная валидация лицензии.")
+                )
+    def _ensure_license(self):
+        if not self.is_unlocked:
+            self.show_section('license')
+            self.log_manager.add_log('❌ Действие заблокировано: лицензия не активна')
+            return False
+
+        if self._validate_current_token():
+            return True
+
+        self.log_manager.add_log('⚠️ Токен устарел, обновляю лицензию...')
+        self.check_license_async(self.get_hwid())
+        self.show_section('license')
+        return False
 
     def _apply_license_result(self, is_valid, message):
         self.is_unlocked = is_valid
@@ -995,9 +1096,13 @@ class App(customtkinter.CTk):
         return frame
 
     def _action_start_selected(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.accounts_control.start_selected)
 
     def _action_select_first_4(self):
+        if not self._ensure_license():
+            return        
         non_farmed = [acc for acc in self.account_manager.accounts if not self.accounts_list.is_reserved_from_rotation(acc)]
         target = non_farmed[:4]
         current = self.account_manager.selected_accounts
@@ -1009,6 +1114,8 @@ class App(customtkinter.CTk):
         self._safe_ui_refresh()
 
     def _action_select_all_toggle(self):
+        if not self._ensure_license():
+            return
         if len(self.account_manager.selected_accounts) == len(self.account_manager.accounts):
             self.account_manager.selected_accounts.clear()
         else:
@@ -1017,24 +1124,39 @@ class App(customtkinter.CTk):
         self._safe_ui_refresh()
 
     def _action_kill_selected(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.accounts_control.kill_selected)
 
     def _action_try_get_level(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.accounts_control.try_get_level, lambda _: self.after(300, self._refresh_level_labels))
 
     def _action_kill_all_cs_and_steam(self):
+
+        if not self._ensure_license():
+            return
         self._run_action_async(self.control_frame.kill_all_cs_and_steam)
 
     def _action_move_all_cs_windows(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.control_frame.move_all_cs_windows)
 
     def _action_launch_bes(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.control_frame.launch_bes)
 
     def _action_support_developer(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.control_frame.sendCasesMe)
 
     def _action_send_trade_selected(self):
+        if not self._ensure_license():
+            return
         self.config_tab.send_trade_selected(on_trade_sent=self._on_trade_sent_success)
 
     def _on_trade_sent_success(self, login):
@@ -1060,12 +1182,18 @@ class App(customtkinter.CTk):
         self._queue_ui_action(mark_sent)
 
     def _action_open_looter_settings(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.config_tab.open_looter_settings)
 
     def _action_marked_farmer(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.accounts_control.mark_farmed, lambda _: self._safe_ui_refresh())
 
     def _action_make_lobbies_and_search(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.main_menu.make_lobbies_and_search_game)
 
     def trigger_make_lobbies_and_search_button(self):
@@ -1088,12 +1216,18 @@ class App(customtkinter.CTk):
             return False
             
     def _action_make_lobbies(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.main_menu.make_lobbies)
 
     def _action_shuffle_lobbies(self):
+        if not self._ensure_license():
+            return
         self._run_action_async(self.main_menu.shuffle_lobbies)
 
     def _action_disband_lobbies(self):
+        if not self._ensure_license():
+            return        
         self._run_action_async(self.main_menu.disband_lobbies)
 
     def _load_region_json_if_exists(self):
