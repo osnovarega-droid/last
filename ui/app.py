@@ -7,7 +7,6 @@ import uuid
 import hashlib
 import sys
 import base64
-import secrets
 import time
 import rsa
 from datetime import datetime, timedelta
@@ -79,7 +78,7 @@ class SteamRouteManager:
                 ["netsh", "advfirewall", "firewall"] + cmd_args,
                 capture_output=True,
                 check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return True
         except Exception:
@@ -99,7 +98,7 @@ class SteamRouteManager:
     def full_cleanup(self):
         try:
             cmd = f'Remove-NetFirewallRule -Name "{self.PREFIX}*" -ErrorAction SilentlyContinue'
-            subprocess.run(["powershell", "-Command", cmd], creationflags=subprocess.CREATE_NO_WINDOW)
+            subprocess.run(["powershell", "-Command", cmd], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception:
             pass
 
@@ -107,7 +106,7 @@ class SteamRouteManager:
         try:
             cmd = (
                 f'Get-NetFirewallRule -DisplayName "{self.PREFIX}*" -ErrorAction SilentlyContinue '
-                '| Select-Object -ExpandProperty DisplayName'
+                "| Select-Object -ExpandProperty DisplayName"
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
@@ -120,7 +119,7 @@ class SteamRouteManager:
             if result.returncode != 0:
                 cmd = (
                     f'Get-NetFirewallRule -Name "{self.PREFIX}*" -ErrorAction SilentlyContinue '
-                    '| Select-Object -ExpandProperty Name'
+                    "| Select-Object -ExpandProperty Name"
                 )
                 result = subprocess.run(
                     ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
@@ -138,10 +137,11 @@ class SteamRouteManager:
                 rule_name = line.strip()
                 if not rule_name.startswith(self.PREFIX):
                     continue
-                blocked_regions.add(rule_name[len(self.PREFIX):])
+                blocked_regions.add(rule_name[len(self.PREFIX) :])
             return blocked_regions
         except Exception:
             return set()
+
 
 class App(customtkinter.CTk):
     def __init__(self, gsi_manager=None, startup_gpu_info=None):
@@ -155,6 +155,7 @@ class App(customtkinter.CTk):
         self._ui_actions_queue = queue.SimpleQueue()
         self._pending_section = None
         self._section_switch_job = None
+
         self.is_unlocked = False
         self.license_token = None
         self.license_exp = 0
@@ -162,9 +163,10 @@ class App(customtkinter.CTk):
         self.license_challenge_id = None
         self.license_challenge_exp = 0
         self._license_check_in_flight = False
+
         self.http_session = requests.Session()
-        self.http_session.verify = True
-        
+        self.http_session.verify = True  # для http:// не влияет, но не мешает
+
         self.geometry("1100x600")
         self.minsize(1100, 600)
         self.maxsize(1100, 600)
@@ -174,7 +176,10 @@ class App(customtkinter.CTk):
         base_path = Path(sys._MEIPASS) if hasattr(sys, "_MEIPASS") else Path(__file__).parent.parent
         icon_path = Path(base_path) / "Icon1.ico"
         if icon_path.exists():
-            self.iconbitmap(icon_path)
+            try:
+                self.iconbitmap(icon_path)
+            except Exception:
+                pass
 
         self.account_manager = AccountManager()
         self.log_manager = LogManager()
@@ -184,9 +189,11 @@ class App(customtkinter.CTk):
         self.sdr_regions = {}
         self._level_file_mtime = None
         self.lobby_buttons = {}
-        
+
         self._build_srt_state()
         self._load_region_json_if_exists()
+
+        # ВАЖНО: сначала создаём legacy контроллеры (accounts_list нужен для functional UI)
         self._create_hidden_legacy_controllers()
         self._build_layout()
 
@@ -198,7 +205,8 @@ class App(customtkinter.CTk):
         self._start_ui_actions_pump()
         self._start_runtime_status_tracking()
         self._start_background_check()
-        
+
+    # ---------------- UI queue / async ----------------
     def _start_ui_actions_pump(self):
         def pump():
             try:
@@ -220,7 +228,7 @@ class App(customtkinter.CTk):
             self._ui_actions_queue.put(action)
         except Exception:
             pass
-            
+
     def _run_action_async(self, fn, done_callback=None):
         future = self.executor.submit(fn)
 
@@ -238,6 +246,7 @@ class App(customtkinter.CTk):
         self._sync_switches_with_selection()
         self._update_accounts_info()
 
+    # ---------------- Legacy controllers ----------------
     def _create_hidden_legacy_controllers(self):
         self.legacy_host = customtkinter.CTkFrame(self, fg_color="transparent")
 
@@ -253,16 +262,33 @@ class App(customtkinter.CTk):
         self.control_frame.set_accounts_list_frame(self.accounts_list)
         self.accounts_list.set_control_frame(self.control_frame)
 
+    # ---------------- Layout ----------------
     def _build_layout(self):
+        # страховка, чтобы functional секция не упала
+        if not hasattr(self, "accounts_list"):
+            self._create_hidden_legacy_controllers()
+
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self.sidebar = customtkinter.CTkFrame(self, width=200, corner_radius=1, fg_color=BG_PANEL, border_width=1, border_color=BG_BORDER)
+        self.sidebar = customtkinter.CTkFrame(
+            self,
+            width=200,
+            corner_radius=1,
+            fg_color=BG_PANEL,
+            border_width=1,
+            border_color=BG_BORDER,
+        )
         self.sidebar.grid(row=0, column=0, sticky="nsew", padx=(1, 1), pady=1)
         self.sidebar.grid_propagate(False)
         self.sidebar.grid_rowconfigure(7, weight=1)
 
-        customtkinter.CTkLabel(self.sidebar, text="Goose Panel", font=customtkinter.CTkFont(size=20, weight="bold"), text_color=TXT_MAIN).grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
+        customtkinter.CTkLabel(
+            self.sidebar,
+            text="Goose Panel",
+            font=customtkinter.CTkFont(size=20, weight="bold"),
+            text_color=TXT_MAIN,
+        ).grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
 
         self.nav_buttons = {}
         nav_items = [("functional", "Functionals"), ("config", "Configurations"), ("license", "License"), ("stats", "Accs Statistic")]
@@ -284,19 +310,46 @@ class App(customtkinter.CTk):
             btn.grid(row=idx, column=0, padx=24, pady=4)
             self.nav_buttons[key] = btn
 
-        logs_wrap = customtkinter.CTkFrame(self.sidebar, width=197, fg_color=BG_CARD_ALT, corner_radius=1, border_width=1, border_color=BG_BORDER)
+        logs_wrap = customtkinter.CTkFrame(
+            self.sidebar,
+            width=197,
+            fg_color=BG_CARD_ALT,
+            corner_radius=1,
+            border_width=1,
+            border_color=BG_BORDER,
+        )
         logs_wrap.grid(row=7, column=0, padx=2, pady=(2, 2), sticky="nsew")
         logs_wrap.grid_propagate(False)
         logs_wrap.grid_columnconfigure(0, weight=1)
         logs_wrap.grid_rowconfigure(1, weight=1)
 
-        customtkinter.CTkLabel(logs_wrap, text="• Logs", text_color=TXT_MAIN, font=customtkinter.CTkFont(size=15, weight="bold")).grid(row=0, column=0, padx=8, pady=(6, 2), sticky="w")
+        customtkinter.CTkLabel(
+            logs_wrap,
+            text="• Logs",
+            text_color=TXT_MAIN,
+            font=customtkinter.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=8, pady=(6, 2), sticky="w")
 
-        self.logs_box = customtkinter.CTkTextbox(logs_wrap, width=250, fg_color="#0e1428", text_color="#98a7cf", border_width=0, corner_radius=8, wrap="word", font=customtkinter.CTkFont(size=11))
+        self.logs_box = customtkinter.CTkTextbox(
+            logs_wrap,
+            width=250,
+            fg_color="#0e1428",
+            text_color="#98a7cf",
+            border_width=0,
+            corner_radius=8,
+            wrap="word",
+            font=customtkinter.CTkFont(size=11),
+        )
         self.logs_box.grid(row=1, column=0, padx=2, pady=(0, 2), sticky="nsew")
         self.log_manager.textbox = self.logs_box
 
-        self.content = customtkinter.CTkFrame(self, fg_color=BG_PANEL, corner_radius=12, border_width=1, border_color=BG_BORDER)
+        self.content = customtkinter.CTkFrame(
+            self,
+            fg_color=BG_PANEL,
+            corner_radius=12,
+            border_width=1,
+            border_color=BG_BORDER,
+        )
         self.content.grid(row=0, column=1, padx=(6, 10), pady=10, sticky="nsew")
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
@@ -317,6 +370,7 @@ class App(customtkinter.CTk):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
+    # ---------------- Reset proxy/firewall ----------------
     def _reset_windows_proxy(self):
         if not sys.platform.startswith("win"):
             self.log_manager.add_log("⚠️ Reset доступен только на Windows")
@@ -325,24 +379,25 @@ class App(customtkinter.CTk):
         self.log_manager.add_log("🔄 Reset: сброс proxy...")
 
         commands = [
-            # Удаляем SRT firewall-правила (по Name и DisplayName)
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", 'Remove-NetFirewallRule -Name "FSN_Route_*" -ErrorAction SilentlyContinue; Get-NetFirewallRule -DisplayName "FSN_Route_*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue'],
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                'Remove-NetFirewallRule -Name "FSN_Route_*" -ErrorAction SilentlyContinue; '
+                'Get-NetFirewallRule -DisplayName "FSN_Route_*" -ErrorAction SilentlyContinue | '
+                "Remove-NetFirewallRule -ErrorAction SilentlyContinue",
+            ],
             ["netsh", "advfirewall", "firewall", "delete", "rule", "name=FSN_Route_*"],
-
-            # WinHTTP proxy -> direct
             ["netsh", "winhttp", "reset", "proxy"],
-
-            # WinINET proxy (текущий пользователь)
             ["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"],
             ["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer", "/t", "REG_SZ", "/d", "", "/f"],
             ["reg", "delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "AutoConfigURL", "/f"],
             ["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "AutoDetect", "/t", "REG_DWORD", "/d", "1", "/f"],
-
-            # Машинные ключи (best effort, могут требовать admin)
             ["reg", "add", r"HKLM\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"],
             ["reg", "add", r"HKLM\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer", "/t", "REG_SZ", "/d", "", "/f"],
             ["reg", "delete", r"HKLM\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "AutoConfigURL", "/f"],
-
             ["rundll32.exe", "inetcpl.cpl,ClearMyTracksByProcess", "8"],
             ["ipconfig", "/flushdns"],
         ]
@@ -362,19 +417,8 @@ class App(customtkinter.CTk):
         except Exception:
             verify_text = ""
 
-        direct_markers = (
-            "direct access",
-            "прямой доступ",
-            "without proxy",
-            "без прокси",
-            "no proxy server",
-            "нет прокси",
-        )
-        has_proxy_markers = (
-            "proxy server",
-            "прокси-сервер",
-            "proxy-server",
-        )
+        direct_markers = ("direct access", "прямой доступ", "without proxy", "без прокси", "no proxy server", "нет прокси")
+        has_proxy_markers = ("proxy server", "прокси-сервер", "proxy-server")
 
         is_direct = any(marker in verify_text for marker in direct_markers)
         if not is_direct and verify_text:
@@ -387,6 +431,7 @@ class App(customtkinter.CTk):
         else:
             self.log_manager.add_log("⚠️ Reset выполнен, но WinHTTP не подтвердил direct mode")
 
+    # ---------------- Functional section ----------------
     def _build_functional_section(self, parent):
         frame = customtkinter.CTkFrame(parent, fg_color="transparent")
         frame.grid_columnconfigure(0, weight=1)
@@ -394,11 +439,23 @@ class App(customtkinter.CTk):
 
         top = customtkinter.CTkFrame(frame, fg_color="transparent")
         top.grid(row=0, column=0, padx=10, pady=(8, 6), sticky="ew")
+
         title_frame = customtkinter.CTkFrame(top, fg_color="transparent")
         title_frame.grid(row=0, column=0, sticky="w")
-        customtkinter.CTkLabel(title_frame, text="Accounts", text_color=TXT_MAIN, font=customtkinter.CTkFont(size=24, weight="bold")).grid(row=0, column=0, padx=(0, 10))
 
-        self.accounts_info = customtkinter.CTkLabel(title_frame, text="0 accounts • 0 selected • 0 launched", text_color=TXT_MUTED, font=customtkinter.CTkFont(size=12))
+        customtkinter.CTkLabel(
+            title_frame,
+            text="Accounts",
+            text_color=TXT_MAIN,
+            font=customtkinter.CTkFont(size=24, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 10))
+
+        self.accounts_info = customtkinter.CTkLabel(
+            title_frame,
+            text="0 accounts • 0 selected • 0 launched",
+            text_color=TXT_MUTED,
+            font=customtkinter.CTkFont(size=12),
+        )
         self.accounts_info.grid(row=0, column=1)
 
         search_wrap = customtkinter.CTkFrame(title_frame, fg_color="transparent")
@@ -406,7 +463,16 @@ class App(customtkinter.CTk):
         self.search_var = customtkinter.StringVar()
         self.search_var.trace_add("write", lambda *_: self._apply_account_filter())
 
-        customtkinter.CTkEntry(search_wrap, textvariable=self.search_var, placeholder_text="Search", width=220, height=32, fg_color=BG_CARD, border_color=BG_BORDER, text_color=TXT_MAIN).grid(row=0, column=0)
+        customtkinter.CTkEntry(
+            search_wrap,
+            textvariable=self.search_var,
+            placeholder_text="Search",
+            width=220,
+            height=32,
+            fg_color=BG_CARD,
+            border_color=BG_BORDER,
+            text_color=TXT_MAIN,
+        ).grid(row=0, column=0)
 
         actions = customtkinter.CTkFrame(frame, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BG_BORDER)
         actions.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="ew")
@@ -513,7 +579,14 @@ class App(customtkinter.CTk):
             row.grid(row=idx, column=0, padx=4, pady=3, sticky="ew")
             row.grid_columnconfigure(1, weight=1)
 
-            sw = customtkinter.CTkSwitch(row, text="", width=24, command=lambda a=account: self._toggle_account(a), fg_color="#2d3b60", progress_color=ACCENT_BLUE)
+            sw = customtkinter.CTkSwitch(
+                row,
+                text="",
+                width=24,
+                command=lambda a=account: self._toggle_account(a),
+                fg_color="#2d3b60",
+                progress_color=ACCENT_BLUE,
+            )
             sw.grid(row=0, column=0, rowspan=2, padx=(6, 5), pady=6, sticky="w")
             if account in self.account_manager.selected_accounts:
                 sw.select()
@@ -543,17 +616,19 @@ class App(customtkinter.CTk):
             account.setColorCallback(lambda color, a=account: self._handle_account_color_change(a, color))
             self.account_badges[account.login] = badge
 
-            self.account_row_items.append({
-                "row": row,
-                "account": account,
-                "login_lower": account.login.lower(),
-                "switch": sw,
-                "login_label": login_label,
-                "level_label": level_label,
-                "badge": badge,
-            })
+            self.account_row_items.append(
+                {
+                    "row": row,
+                    "account": account,
+                    "login_lower": account.login.lower(),
+                    "switch": sw,
+                    "login_label": login_label,
+                    "level_label": level_label,
+                    "badge": badge,
+                }
+            )
             self._refresh_account_badge(account)
-            
+
     def _refresh_level_labels(self):
         try:
             if hasattr(self.accounts_list, "_load_levels_from_json"):
@@ -568,8 +643,8 @@ class App(customtkinter.CTk):
                 item["level_label"].configure(text=f"lvl: {level_text} | xp: {xp_text}")
         except Exception:
             pass
+
     def _refresh_level_labels_if_changed(self):
-        """Обновляет level/xp в UI, если level.json изменился."""
         try:
             level_path = Path("level.json")
             mtime = level_path.stat().st_mtime if level_path.exists() else None
@@ -578,6 +653,7 @@ class App(customtkinter.CTk):
                 self._refresh_level_labels()
         except Exception:
             pass
+
     def _normalize_account_color(self, color):
         color_map = {"green": ACCENT_GREEN, "yellow": "#f5c542", "white": "#DCE4EE"}
         return color_map.get(str(color).lower(), color)
@@ -602,6 +678,7 @@ class App(customtkinter.CTk):
             badge_text, badge_color = self._get_weekly_badge_status(account)
             item["badge"].configure(text=badge_text, fg_color=badge_color)
             return
+
     def _get_weekly_window_start(self, now=None):
         current_time = now or datetime.now()
         reset_anchor = current_time.replace(hour=WEEKLY_RESET_HOUR, minute=0, second=0, microsecond=0)
@@ -644,6 +721,7 @@ class App(customtkinter.CTk):
             return "Take drop", ACCENT_GREEN
 
         return "Idle week", ACCENT_BLUE
+
     def _refresh_all_runtime_states(self):
         for item in self.account_row_items:
             account = item["account"]
@@ -651,16 +729,6 @@ class App(customtkinter.CTk):
             item["login_label"].configure(text_color=current_color)
         self._sync_switches_with_selection()
         self._update_accounts_info()
-
-    def _poll_runtime_states(self):
-        running_map = {}
-        for item in self.account_row_items:
-            account = item["account"]
-            try:
-                running_map[account] = account.isCSValid()
-            except Exception:
-                running_map[account] = False
-        return running_map
 
     def _start_runtime_status_tracking(self):
         def poll():
@@ -710,32 +778,17 @@ class App(customtkinter.CTk):
         if hasattr(self, "accounts_info"):
             self.accounts_info.configure(text=f"{total} accounts • {selected} selected • {launched} launched")
 
+    # ---------------- Config section ----------------
     def _build_config_section(self, parent):
         frame = customtkinter.CTkFrame(parent, fg_color="transparent")
         frame.grid_columnconfigure(0, weight=1)
 
         header = customtkinter.CTkFrame(frame, fg_color="transparent")
         header.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="ew")
-        customtkinter.CTkLabel(
-            header,
-            text="Configurations",
-            font=customtkinter.CTkFont(size=24, weight="bold"),
-            text_color=TXT_MAIN,
-        ).grid(row=0, column=0, sticky="w")
-        customtkinter.CTkLabel(
-            header,
-            text="Настройте автологику и пути Steam/CS2 в одном месте",
-            font=customtkinter.CTkFont(size=11),
-            text_color=TXT_MUTED,
-        ).grid(row=1, column=0, pady=(4, 0), sticky="w")
+        customtkinter.CTkLabel(header, text="Configurations", font=customtkinter.CTkFont(size=24, weight="bold"), text_color=TXT_MAIN).grid(row=0, column=0, sticky="w")
+        customtkinter.CTkLabel(header, text="Настройте автологику и пути Steam/CS2 в одном месте", font=customtkinter.CTkFont(size=11), text_color=TXT_MUTED).grid(row=1, column=0, pady=(4, 0), sticky="w")
 
-        card = customtkinter.CTkFrame(
-            frame,
-            fg_color=BG_CARD,
-            corner_radius=10,
-            border_width=1,
-            border_color=BG_BORDER,
-        )
+        card = customtkinter.CTkFrame(frame, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BG_BORDER)
         card.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="nsew")
         card.grid_columnconfigure(0, weight=1, minsize=150)
         card.grid_columnconfigure(1, weight=2, minsize=150)
@@ -743,12 +796,7 @@ class App(customtkinter.CTk):
         switches_card = customtkinter.CTkFrame(card, fg_color=BG_CARD_ALT, corner_radius=10, border_width=1, border_color=BG_BORDER)
         switches_card.grid(row=0, column=0, padx=(8, 4), pady=8, sticky="nsew")
         switches_card.grid_columnconfigure(0, weight=1)
-        customtkinter.CTkLabel(
-            switches_card,
-            text="Automation",
-            text_color=TXT_MAIN,
-            font=customtkinter.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, padx=10, pady=(8, 2), sticky="w")
+        customtkinter.CTkLabel(switches_card, text="Automation", text_color=TXT_MAIN, font=customtkinter.CTkFont(size=15, weight="bold")).grid(row=0, column=0, padx=10, pady=(8, 2), sticky="w")
 
         self.config_toggle_auto_accept = self._create_labeled_switch(
             switches_card,
@@ -775,16 +823,12 @@ class App(customtkinter.CTk):
             setting_key="AutomaticAccountSwitchingEnabled",
             default=True,
         )
+
         paths_card = customtkinter.CTkFrame(card, fg_color=BG_CARD_ALT, corner_radius=10, border_width=1, border_color=BG_BORDER)
         paths_card.grid(row=0, column=1, padx=(4, 8), pady=8, sticky="nsew")
         paths_card.grid_columnconfigure(0, weight=1)
 
-        customtkinter.CTkLabel(
-            paths_card,
-            text="Steam / CS2 paths",
-            text_color=TXT_MAIN,
-            font=customtkinter.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, padx=10, pady=(8, 2), sticky="w")
+        customtkinter.CTkLabel(paths_card, text="Steam / CS2 paths", text_color=TXT_MAIN, font=customtkinter.CTkFont(size=15, weight="bold")).grid(row=0, column=0, padx=10, pady=(8, 2), sticky="w")
 
         self.path_status = {}
         self.path_entries = {}
@@ -805,16 +849,12 @@ class App(customtkinter.CTk):
             validator=lambda value: (Path(value) / "game" / "bin" / "win64" / "cs2.exe").is_file(),
         )
 
-        self.config_status_label = customtkinter.CTkLabel(
-            frame,
-            text="",
-            text_color=TXT_MUTED,
-            font=customtkinter.CTkFont(size=11, weight="bold"),
-        )
+        self.config_status_label = customtkinter.CTkLabel(frame, text="", text_color=TXT_MUTED, font=customtkinter.CTkFont(size=11, weight="bold"))
         self.config_status_label.grid(row=2, column=0, padx=14, pady=(0, 2), sticky="e")
 
         frame.grid_rowconfigure(1, weight=1)
         return frame
+
     def _create_labeled_switch(self, parent, row, title, description, setting_key, default=False, on_toggle=None):
         row_wrap = customtkinter.CTkFrame(parent, fg_color=BG_CARD, corner_radius=8, border_width=1, border_color=BG_BORDER)
         row_wrap.grid(row=row, column=0, padx=8, pady=5, sticky="ew")
@@ -893,18 +933,19 @@ class App(customtkinter.CTk):
             module = self.main_menu.auto_accept_module
             if enabled and not module._running:
                 module.start()
-            elif not enabled and module._running:
+            elif (not enabled) and module._running:
                 module.stop()
         except Exception:
             pass
 
+    # ---------------- License logic ----------------
     def get_hwid(self):
         mac = uuid.getnode()
         return hashlib.sha256(str(mac).encode("utf-8")).hexdigest()[:20].upper()
 
-    def _urlsafe_b64decode(self, value):
-        padding = '=' * ((4 - len(value) % 4) % 4)
-        return base64.urlsafe_b64decode((value + padding).encode('utf-8'))
+    def _urlsafe_b64decode(self, value: str) -> bytes:
+        padding = "=" * ((4 - len(value) % 4) % 4)
+        return base64.urlsafe_b64decode((value + padding).encode("utf-8"))
 
     def _load_public_key(self):
         try:
@@ -959,6 +1000,25 @@ class App(customtkinter.CTk):
             self._clear_license_cache()
             return False
 
+    def _request_license_challenge(self, hwid):
+        url = f"{LICENSE_SERVER_URL}/api/challenge"
+        response = self.http_session.get(url, params={"hwid": hwid, "ts": int(time.time())}, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Некорректный challenge от сервера")
+
+        nonce = data.get("nonce")
+        challenge_id = data.get("challenge_id")
+        expires_in = int(data.get("expires_in", LICENSE_CHALLENGE_TTL_SECONDS))
+        if not nonce or not challenge_id:
+            raise ValueError("Сервер не вернул nonce/challenge_id")
+
+        self.license_nonce = nonce
+        self.license_challenge_id = challenge_id
+        self.license_challenge_exp = int(time.time()) + min(expires_in, LICENSE_CHALLENGE_TTL_SECONDS)
+        return {"nonce": nonce, "challenge_id": challenge_id}
+
     def _request_license_state(self, hwid):
         if LICENSE_SERVER_URL.lower().startswith("http://"):
             self.log_manager.add_log("⚠️ LICENSE_SERVER_URL использует HTTP (без TLS). Используется защита подписью RSA.")
@@ -985,49 +1045,47 @@ class App(customtkinter.CTk):
             return self._verify_signed_token(signed_token, hwid, challenge["nonce"])
 
         raise ValueError(data.get("message") or "Сервер не вернул signed_token")
-        
-    def _verify_signed_token(self, signed_token, expected_hwid, expected_nonce=None):
-        if not signed_token or '.' not in signed_token:
-            raise ValueError('Подпись лицензии отсутствует')
 
-        payload_b64, signature_b64 = signed_token.split('.', 1)
+    def _verify_signed_token(self, signed_token, expected_hwid, expected_nonce=None):
+        if not signed_token or "." not in signed_token:
+            raise ValueError("Подпись лицензии отсутствует")
+
+        payload_b64, signature_b64 = signed_token.split(".", 1)
         payload_raw = self._urlsafe_b64decode(payload_b64)
         signature = self._urlsafe_b64decode(signature_b64)
 
         public_key = self._load_public_key()
         if public_key is None:
-            raise ValueError('Отсутствует settings/license_public_key.pem для проверки подписи')
+            raise ValueError("Отсутствует settings/license_public_key.pem для проверки подписи")
 
         try:
             rsa.verify(payload_raw, signature, public_key)
         except Exception as exc:
-            raise ValueError(f'Подпись сервера не прошла проверку: {exc}') from exc
+            raise ValueError(f"Подпись сервера не прошла проверку: {exc}") from exc
 
-        payload = json.loads(payload_raw.decode('utf-8'))
+        payload = json.loads(payload_raw.decode("utf-8"))
         now_ts = int(time.time())
-        iat = int(payload.get('iat', 0))
-        exp = int(payload.get('exp', 0))
+        iat = int(payload.get("iat", 0))
+        exp = int(payload.get("exp", 0))
 
-        if payload.get('hwid') != expected_hwid:
-            raise ValueError('HWID в токене не совпадает с устройством')
-        if expected_nonce and payload.get('nonce') != expected_nonce:
-            raise ValueError('Nonce в токене не совпадает с запросом')
+        if payload.get("hwid") != expected_hwid:
+            raise ValueError("HWID в токене не совпадает с устройством")
+        if expected_nonce and payload.get("nonce") != expected_nonce:
+            raise ValueError("Nonce в токене не совпадает с запросом")
         if iat > now_ts + LICENSE_TOKEN_TTL_GRACE_SECONDS:
-            raise ValueError('Токен имеет некорректный iat')
+            raise ValueError("Токен имеет некорректный iat")
         if exp <= now_ts:
-            raise ValueError('Токен лицензии истёк')
+            raise ValueError("Токен лицензии истёк")
         if exp - iat > MAX_TOKEN_TTL_SECONDS:
-            raise ValueError('TTL токена превышает допустимый лимит')
-        if payload.get('status') != 'active':
-            raise ValueError(payload.get('message') or 'Лицензия не активна')
+            raise ValueError("TTL токена превышает допустимый лимит")
+        if payload.get("status") != "active":
+            raise ValueError(payload.get("message") or "Лицензия не активна")
 
         self.license_token = signed_token
         self.license_exp = exp
-        self.license_nonce = payload.get('nonce')
+        self.license_nonce = payload.get("nonce")
         self._save_license_cache(signed_token, expected_hwid, exp)
         return payload
-
-
 
     def _validate_current_token(self):
         return int(time.time()) < int(self.license_exp) - LICENSE_TOKEN_TTL_GRACE_SECONDS
@@ -1037,13 +1095,13 @@ class App(customtkinter.CTk):
             return
         self._license_check_in_flight = True
         self.log_manager.add_log(f"🔄 Проверка лицензии: {hwid}...")
-        self.license_status.configure(text="Статус: Проверка...", text_color=ACCENT_ORANGE)
+        try:
+            self.license_status.configure(text="Статус: Проверка...", text_color=ACCENT_ORANGE)
+        except Exception:
+            pass
         self.executor.submit(self._do_check_request, hwid)
 
-
     def _do_check_request(self, hwid):
-
-
         try:
             payload = self._request_license_state(hwid)
             msg = f"Активна до {payload.get('expires_at', 'n/a')}"
@@ -1062,62 +1120,58 @@ class App(customtkinter.CTk):
             self.after(15000, self._start_background_check)
 
     def _do_silent_check(self, hwid):
-
-
         try:
             if self._validate_current_token():
                 return
-
             self._request_license_state(hwid)
         except Exception:
             if self.is_unlocked:
                 self._queue_ui_action(lambda: self._apply_license_result(False, "Сеанс лицензии истёк/отозван"))
-                self._queue_ui_action(
-                    lambda: self.log_manager.add_log("⚠️ Сеанс прерван: нужна повторная серверная валидация лицензии.")
-                )
+                self._queue_ui_action(lambda: self.log_manager.add_log("⚠️ Сеанс прерван: нужна повторная серверная валидация лицензии."))
+
     def _ensure_license(self):
         if not self.is_unlocked:
-            self.license_status.configure(text="Статус: Обновление лицензии...", text_color=ACCENT_ORANGE)
-            self.log_manager.add_log('❌ Действие заблокировано: лицензия не активна')
+            try:
+                self.license_status.configure(text="Статус: Обновление лицензии...", text_color=ACCENT_ORANGE)
+            except Exception:
+                pass
+            self.log_manager.add_log("❌ Действие заблокировано: лицензия не активна")
             return False
 
         if self._validate_current_token():
             return True
 
-        self.log_manager.add_log('⚠️ Токен устарел, обновляю лицензию...')
+        self.log_manager.add_log("⚠️ Токен устарел, обновляю лицензию...")
         self.check_license_async(self.get_hwid())
-        self.show_section('license')
+        self.show_section("license")
         return False
 
     def _apply_license_result(self, is_valid, message):
         self.is_unlocked = is_valid
 
         if is_valid:
-            self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_GREEN)
+            try:
+                self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_GREEN)
+            except Exception:
+                pass
             self.log_manager.add_log("✅ Лицензия подтверждена сервером!")
             self.show_section(self._pending_section or "license")
         else:
-            self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_RED)
+            try:
+                self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_RED)
+            except Exception:
+                pass
             self.log_manager.add_log(f"❌ Лицензия отклонена: {message}")
             self.show_section("license")
-            
+
+    # ---------------- License section UI ----------------
     def _build_license_section(self, parent):
         frame = customtkinter.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BG_BORDER)
         frame.grid_columnconfigure(0, weight=1)
 
-        customtkinter.CTkLabel(
-            frame,
-            text="License",
-            font=customtkinter.CTkFont(size=30, weight="bold"),
-            text_color=TXT_MAIN,
-        ).grid(row=0, column=0, padx=16, pady=(20, 8), sticky="w")
+        customtkinter.CTkLabel(frame, text="License", font=customtkinter.CTkFont(size=30, weight="bold"), text_color=TXT_MAIN).grid(row=0, column=0, padx=16, pady=(20, 8), sticky="w")
 
-        self.license_status = customtkinter.CTkLabel(
-            frame,
-            text="Статус: Ожидание...",
-            text_color=ACCENT_ORANGE,
-            font=customtkinter.CTkFont(size=14, weight="bold"),
-        )
+        self.license_status = customtkinter.CTkLabel(frame, text="Статус: Ожидание...", text_color=ACCENT_ORANGE, font=customtkinter.CTkFont(size=14, weight="bold"))
         self.license_status.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
 
         block = customtkinter.CTkFrame(frame, fg_color=BG_CARD_ALT, corner_radius=8, border_width=1, border_color=BG_BORDER)
@@ -1157,12 +1211,14 @@ class App(customtkinter.CTk):
         self.check_license_async(my_hwid)
         return frame
 
+    # ---------------- Stats section ----------------
     def _build_stats_section(self, parent):
         frame = customtkinter.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BG_BORDER)
         frame.grid_columnconfigure(0, weight=1)
         customtkinter.CTkLabel(frame, text="Accs Stats", font=customtkinter.CTkFont(size=30, weight="bold"), text_color=TXT_MAIN).grid(row=0, column=0, padx=16, pady=(20, 8), sticky="w")
         return frame
 
+    # ---------------- Actions (locked) ----------------
     def _action_start_selected(self):
         if not self._ensure_license():
             return
@@ -1170,7 +1226,7 @@ class App(customtkinter.CTk):
 
     def _action_select_first_4(self):
         if not self._ensure_license():
-            return        
+            return
         non_farmed = [acc for acc in self.account_manager.accounts if not self.accounts_list.is_reserved_from_rotation(acc)]
         target = non_farmed[:4]
         current = self.account_manager.selected_accounts
@@ -1202,7 +1258,6 @@ class App(customtkinter.CTk):
         self._run_action_async(self.accounts_control.try_get_level, lambda _: self.after(300, self._refresh_level_labels))
 
     def _action_kill_all_cs_and_steam(self):
-
         if not self._ensure_license():
             return
         self._run_action_async(self.control_frame.kill_all_cs_and_steam)
@@ -1282,7 +1337,7 @@ class App(customtkinter.CTk):
         except Exception as error:
             self.log_manager.add_log(f"❌ Failed to invoke app.py button: {error}")
             return False
-            
+
     def _action_make_lobbies(self):
         if not self._ensure_license():
             return
@@ -1295,9 +1350,10 @@ class App(customtkinter.CTk):
 
     def _action_disband_lobbies(self):
         if not self._ensure_license():
-            return        
+            return
         self._run_action_async(self.main_menu.disband_lobbies)
 
+    # ---------------- Regions / SRT ----------------
     def _load_region_json_if_exists(self):
         region_path = Path("region.json")
         if not region_path.exists():
@@ -1333,11 +1389,10 @@ class App(customtkinter.CTk):
                         start_port, end_port = 27015, 27060
 
                     ping_targets.append((ip, start_port, end_port))
+
                 if not relay_ips:
                     continue
 
-                # Используем только точные IP-адреса релэев, без расширения до /24,
-                # чтобы блокировка одной-двух зон не "задевала" соседние регионы.
                 parsed_regions[desc] = sorted(set(relay_ips))
                 parsed_ping_targets[desc] = sorted(set(ping_targets))
 
@@ -1353,15 +1408,10 @@ class App(customtkinter.CTk):
         self.blocked_regions = set()
         self.srt_rows = {}
         self.region_ping_cache = {}
-        
+
     def _build_srt_rows(self):
         if not self.sdr_regions:
-            customtkinter.CTkLabel(
-                self.srt_scroll,
-                text="region.json не найден или пуст",
-                text_color=TXT_MUTED,
-                font=customtkinter.CTkFont(size=11),
-            ).grid(row=0, column=0, padx=6, pady=8, sticky="w")
+            customtkinter.CTkLabel(self.srt_scroll, text="region.json не найден или пуст", text_color=TXT_MUTED, font=customtkinter.CTkFont(size=11)).grid(row=0, column=0, padx=6, pady=8, sticky="w")
             return
 
         for idx, region in enumerate(self.sdr_regions.keys()):
@@ -1369,8 +1419,7 @@ class App(customtkinter.CTk):
             row.grid(row=idx, column=0, padx=2, pady=2, sticky="ew")
             row.grid_columnconfigure(0, weight=1)
 
-            name_label = customtkinter.CTkLabel(row, text=region, text_color=TXT_MAIN, font=customtkinter.CTkFont(size=11, weight="bold"))
-            name_label.grid(row=0, column=0, padx=(6, 2), pady=4, sticky="w")
+            customtkinter.CTkLabel(row, text=region, text_color=TXT_MAIN, font=customtkinter.CTkFont(size=11, weight="bold")).grid(row=0, column=0, padx=(6, 2), pady=4, sticky="w")
 
             ping_label = customtkinter.CTkLabel(row, text="-- ms", text_color=TXT_MUTED, font=customtkinter.CTkFont(size=10))
             ping_label.grid(row=0, column=1, padx=2, pady=4)
@@ -1394,15 +1443,13 @@ class App(customtkinter.CTk):
     def _restore_blocked_regions_state(self):
         if self.route_manager is None:
             return
-
         blocked_regions = self.route_manager.get_blocked_regions()
         if not blocked_regions:
             return
-
         self.blocked_regions = {region for region in blocked_regions if region in self.sdr_regions}
         for region in self.blocked_regions:
             self._set_region_visual(region)
-            
+
     def _set_region_visual(self, region):
         row = self.srt_rows.get(region)
         if not row:
@@ -1455,8 +1502,6 @@ class App(customtkinter.CTk):
 
     def _measure_host_latency_ms(self, host, tcp_ports=None):
         try:
-            # Запускаем ping через cmd в фоне на Windows,
-            # чтобы поведение совпадало с ручной командой `ping <ip>`.
             if sys.platform.startswith("win"):
                 cmd = ["cmd", "/c", "ping", "-n", "1", "-w", "1000", host]
             else:
@@ -1481,17 +1526,12 @@ class App(customtkinter.CTk):
             out = "\n".join(decoded_parts).lower()
 
             samples = []
-
-            # Универсальный парсинг строк вида `time=24.4 ms`, `время<1мс`,
-            # а также локализованных форматов, где после числа сразу идёт ms/мс/мсек.
             for m in re.finditer(r"(?:time|время)\s*[=<]?\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:ms|мс|мсек)?", out):
                 try:
                     samples.append(float(m.group(1).replace(",", ".")))
                 except Exception:
                     pass
 
-            # Фолбэк: любое число рядом с суффиксом миллисекунд, если в выводе нет
-            # явных time/время маркеров (встречается в некоторых локализациях/утилитах).
             for m in re.finditer(r"(?<!\d)([0-9]+(?:[\.,][0-9]+)?)\s*(?:ms|мс|мсек)", out):
                 try:
                     samples.append(float(m.group(1).replace(",", ".")))
@@ -1504,24 +1544,21 @@ class App(customtkinter.CTk):
                     samples.append(float(avg_match.group(1).replace(",", ".")))
                 except Exception:
                     pass
-            # Linux/macOS summary: rtt min/avg/max/mdev = 11.3/22.6/...
-            rtt_match = re.search(
-                r"(?:rtt|round-trip)[^=]*=\s*[0-9]+(?:[\.,][0-9]+)?/([0-9]+(?:[\.,][0-9]+)?)/",
-                out,
-            )
+
+            rtt_match = re.search(r"(?:rtt|round-trip)[^=]*=\s*[0-9]+(?:[\.,][0-9]+)?/([0-9]+(?:[\.,][0-9]+)?)/", out)
             if rtt_match:
                 try:
                     samples.append(float(rtt_match.group(1).replace(",", ".")))
                 except Exception:
                     pass
+
             if samples:
                 return samples[0]
 
-            # 2) PowerShell fallback для Windows (часто устойчивее к локализации).
             if sys.platform.startswith("win"):
                 ps_cmd = (
                     f'$r=Test-Connection -Count 1 -TimeoutSeconds 1 -TargetName "{host}" -ErrorAction SilentlyContinue; '
-                    'if ($r) { [double]$r.Latency }'
+                    "if ($r) { [double]$r.Latency }"
                 )
                 ps_result = subprocess.run(
                     ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
@@ -1538,8 +1575,6 @@ class App(customtkinter.CTk):
                     except Exception:
                         pass
 
-
-
             return None
         except Exception:
             return None
@@ -1548,7 +1583,6 @@ class App(customtkinter.CTk):
         try:
             if not target_hosts:
                 return "-- ms"
-
 
             hosts = target_hosts if isinstance(target_hosts, (list, tuple, set)) else [target_hosts]
             best_latency = None
@@ -1566,12 +1600,11 @@ class App(customtkinter.CTk):
 
                     span = max(0, end_port - start_port)
                     step = max(1, span // 3) if span else 1
-                    tcp_ports = sorted({start_port, start_port + step, start_port + step * 2, end_port})
+                    _ = sorted({start_port, start_port + step, start_port + step * 2, end_port})
                 else:
                     host = target
-                    tcp_ports = None
 
-                latency = self._measure_host_latency_ms(host, tcp_ports=tcp_ports)
+                latency = self._measure_host_latency_ms(host)
                 if latency is None:
                     continue
 
@@ -1586,7 +1619,6 @@ class App(customtkinter.CTk):
             return "-- ms"
 
     def _collect_region_pings(self):
-
         ping_map = {}
         for region in self.srt_rows.keys():
             targets = REGION_PING_TARGETS.get(region) or self.sdr_regions.get(region, [])
@@ -1601,7 +1633,6 @@ class App(customtkinter.CTk):
             try:
                 if self.ping_refresh_in_flight:
                     return
-
                 self.ping_refresh_in_flight = True
 
                 def done_callback(future):
@@ -1616,8 +1647,10 @@ class App(customtkinter.CTk):
                 self._run_action_async(self._collect_region_pings, done_callback)
             except Exception:
                 self.ping_refresh_in_flight = False
+
         self.after(500, refresh_once)
 
+    # ---------------- Navigation ----------------
     def _apply_section_switch(self, section_key):
         for key, frame in self.sections.items():
             if key == section_key:
@@ -1626,18 +1659,18 @@ class App(customtkinter.CTk):
                 frame.grid_remove()
 
         for key, button in self.nav_buttons.items():
-            button.configure(fg_color=BG_CARD if key == section_key else BG_CARD_ALT, border_color=ACCENT_GREEN if key == section_key else ACCENT_RED)
+            button.configure(
+                fg_color=BG_CARD if key == section_key else BG_CARD_ALT,
+                border_color=ACCENT_GREEN if key == section_key else ACCENT_RED,
+            )
         self._pending_section = None
         self._section_switch_job = None
 
     def show_section(self, section_key):
         self._pending_section = section_key
 
-        # Обновляем состояние и стиль кнопок в сайдбаре
         for k, button in self.nav_buttons.items():
             is_selected = (k == section_key)
-
-            # Если лицензия не активна — разрешаем только вкладку License
             if (not getattr(self, "is_unlocked", False)) and k != "license":
                 btn_state = "disabled"
             else:
@@ -1649,17 +1682,15 @@ class App(customtkinter.CTk):
                 border_color=ACCENT_GREEN if is_selected else ACCENT_RED,
             )
 
-        # Отложенное переключение секции (анти-дребезг)
         if self._section_switch_job is not None:
             try:
                 self.after_cancel(self._section_switch_job)
             except Exception:
                 pass
 
-        self._section_switch_job = self.after(
-            85,
-            lambda: self._apply_section_switch(self._pending_section)
-    )
+        self._section_switch_job = self.after(85, lambda: self._apply_section_switch(self._pending_section))
+
+    # ---------------- Misc ----------------
     def _log_startup_gpu_info(self, startup_gpu_info):
         if not startup_gpu_info:
             return
@@ -1710,12 +1741,22 @@ class App(customtkinter.CTk):
                 self.after_cancel(self._section_switch_job)
             except Exception:
                 pass
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            self._save_window_position()
+        except Exception:
+            pass
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         try:
             self.quit()
         except Exception:
             pass
-        self.destroy()
+        try:
+            self.destroy()
+        except Exception:
+            pass
         os._exit(0)
 
     def update_label(self):
