@@ -1123,7 +1123,8 @@ class App(customtkinter.CTk):
             return
 
         self._license_check_in_flight = True
-
+        request_id = getattr(self, "_license_check_request_id", 0) + 1
+        self._license_check_request_id = request_id
         self.log_manager.add_log(f"🔄 Проверка лицензии: {hwid}...")
         try:
             self.license_status.configure(text="Статус: Проверка...", text_color=ACCENT_ORANGE)
@@ -1135,13 +1136,18 @@ class App(customtkinter.CTk):
 
         def watchdog():
             # если спустя 15с всё ещё "in flight" — сбрасываем и логируем
-            if self._license_check_in_flight and self.winfo_exists():
+            if (
+                self._license_check_in_flight
+                and getattr(self, "_license_check_request_id", 0) == request_id
+                and self.winfo_exists()
+            ):
                 self._license_check_in_flight = False
-                self.log_manager.add_log("⚠️ Проверка лицензии зависла/не вернулась. Флаг сброшен, попробуйте ещё раз.")
-                try:
-                    self.license_status.configure(text="Статус: Таймаут проверки", text_color=ACCENT_RED)
-                except Exception:
-                    pass
+                if not self.is_unlocked:
+                    self.log_manager.add_log("⚠️ Проверка лицензии зависла/не вернулась. Флаг сброшен, попробуйте ещё раз.")
+                    try:
+                        self.license_status.configure(text="Статус: Таймаут проверки", text_color=ACCENT_RED)
+                    except Exception:
+                        pass
 
         if self.winfo_exists():
             watchdog_id = self.after(LICENSE_WATCHDOG_TIMEOUT_MS, watchdog)
@@ -1152,6 +1158,8 @@ class App(customtkinter.CTk):
         def done(fut):
             nonlocal watchdog_id
             try:
+                # блокируем watchdog до изменения UI, чтобы не перетёр корректный статус
+                self._license_check_in_flight = False
                 if watchdog_id is not None and self.winfo_exists():
                     try:
                         self.after_cancel(watchdog_id)
@@ -1165,8 +1173,7 @@ class App(customtkinter.CTk):
             except Exception as exc:
                 self._apply_license_result(False, f"Проверка не пройдена: {exc}")
 
-            finally:
-                self._license_check_in_flight = False
+       
 
         # важно: если executor.submit упал — тоже сбросить флаг
         try:
@@ -1208,7 +1215,7 @@ class App(customtkinter.CTk):
         payload = future.result()
         expires_at = payload.get("expires_at", "n/a")
         if self.is_unlocked:
-            self.log_manager.add_log(f"ℹ️ Автопроверка лицензии OK (до {expires_at}).")
+
             return
 
         self._apply_license_result(True, f"Активна до {expires_at}")
@@ -1235,14 +1242,14 @@ class App(customtkinter.CTk):
 
         if is_valid:
             try:
-                self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_GREEN)
+                self.license_status.configure(text="Статус: Лицензия подтверждена", text_color=ACCENT_GREEN)
             except Exception:
                 pass
             self.log_manager.add_log("✅ Лицензия подтверждена сервером!")
             self.show_section(self._pending_section or "license")
         else:
             try:
-                self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_RED)
+                self.license_status.configure(text="Статус: Лицензия не подтверждена. Нажмите «Проверить»", text_color=ACCENT_RED)
             except Exception:
                 pass
             self.log_manager.add_log(f"❌ Лицензия отклонена: {message}")
