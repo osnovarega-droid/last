@@ -55,7 +55,9 @@ rwIDAQAB
 -----END PUBLIC KEY-----"""
 LICENSE_CACHE_PATH = Path("settings/license_cache.json")
 LICENSE_TOKEN_TTL_GRACE_SECONDS = 5
-
+LICENSE_RECHECK_INTERVAL_MS = 60000
+LICENSE_REQUEST_TIMEOUT = (3, 8)
+LICENSE_WATCHDOG_TIMEOUT_MS = 25000
 MAX_TOKEN_TTL_SECONDS = 3600
 LICENSE_CHALLENGE_TTL_SECONDS = 30
 
@@ -163,7 +165,7 @@ class App(customtkinter.CTk):
         self.license_challenge_id = None
         self.license_challenge_exp = 0
         self._license_check_in_flight = False
-
+        self._background_license_check_in_flight = False
         self.http_session = requests.Session()
         self.http_session.trust_env = False  # игнорировать системные прокси/ENV (очень часто именно они ломают)
         self.http_session.verify = True  # для http:// не влияет, но не мешает
@@ -205,7 +207,7 @@ class App(customtkinter.CTk):
         self.show_section("license")
         self._start_ui_actions_pump()
         self._start_runtime_status_tracking()
-        self._start_background_check()
+        self.after(LICENSE_RECHECK_INTERVAL_MS, self._start_background_check)
 
     # ---------------- UI queue / async ----------------
     def _start_ui_actions_pump(self):
@@ -1017,7 +1019,7 @@ class App(customtkinter.CTk):
         response = self.http_session.get(
             url,
             params={"hwid": hwid},
-            timeout=(3, 8),
+            timeout=LICENSE_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
 
@@ -1052,7 +1054,7 @@ class App(customtkinter.CTk):
             "ts": int(time.time()),
         }
 
-        response = self.http_session.post(url, json=body, timeout=(3, 8))
+        response = self.http_session.post(url, json=body, timeout=LICENSE_REQUEST_TIMEOUT)
         response.raise_for_status()
 
         data = response.json()
@@ -1142,7 +1144,7 @@ class App(customtkinter.CTk):
                     pass
 
         if self.winfo_exists():
-            watchdog_id = self.after(15000, watchdog)
+            watchdog_id = self.after(LICENSE_WATCHDOG_TIMEOUT_MS, watchdog)
 
         def task():
             return self._request_license_state(hwid)
@@ -1183,22 +1185,33 @@ class App(customtkinter.CTk):
                 pass
 
     def _start_background_check(self):
-        if getattr(self, "is_unlocked", False):
-            my_hwid = self.get_hwid()
-            self._run_action_async(lambda: self._do_silent_check(my_hwid), self._on_silent_check_done)
+        my_hwid = self.get_hwid()
+
+        if self._license_check_in_flight or self._background_license_check_in_flight:
+            if self.winfo_exists():
+                self.after(LICENSE_RECHECK_INTERVAL_MS, self._start_background_check)
+            return
+
+        self._background_license_check_in_flight = True
+        self._run_action_async(lambda: self._request_license_state(my_hwid), self._on_silent_check_done)
 
         if self.winfo_exists():
-            self.after(15000, self._start_background_check)
-
-    def _do_silent_check(self, hwid):
-        if self._validate_current_token():
-            return
-        self._request_license_state(hwid)
+            self.after(LICENSE_RECHECK_INTERVAL_MS, self._start_background_check)
 
     def _on_silent_check_done(self, future):
-        if future.exception() and self.is_unlocked:
-            self._apply_license_result(False, "Сеанс лицензии истёк/отозван")
-            self.log_manager.add_log("⚠️ Сеанс прерван: нужна повторная серверная валидация лицензии.")
+        self._background_license_check_in_flight = False
+
+        if future.exception():
+            self._apply_license_result(False, "Проверьте лицензию: запись не найдена или недоступна в БД")
+            self.log_manager.add_log("⚠️ Автопроверка: лицензия не подтверждена в БД. Доступ ограничен до раздела License.")
+            return
+        payload = future.result()
+        expires_at = payload.get("expires_at", "n/a")
+        if self.is_unlocked:
+            self.log_manager.add_log(f"ℹ️ Автопроверка лицензии OK (до {expires_at}).")
+            return
+
+        self._apply_license_result(True, f"Активна до {expires_at}")
             
     def _ensure_license(self):
         if not self.is_unlocked:
