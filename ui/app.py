@@ -45,7 +45,15 @@ ACCENT_ORANGE = "#ff9500"
 
 LICENSE_SERVER_URL = "http://77.91.96.154"
 LICENSE_PUBLIC_KEY_PATH = Path("settings/license_public_key.pem")
-LICENSE_EMBEDDED_PUBLIC_KEY_PEM = """"""
+LICENSE_EMBEDDED_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvNaTMWsTGK8T0Vt0T5ea
+YOHBJmLjIIArrd2RMeQ4Cdx+RWOJxR/o5VWjLB1SPhH13r0UONb1m9KgHozQjYWj
+TwM28lDr7lTWBKP1+N74Fdneb4E43WTifRiSnIjR2MbSJLDrWgkbOcqFHvk6nUlV
+TLR+LM/AF2z5/S1CkDCcAg45ixIYXrBJB1sMjP2nv6OqSr3DLugSFREMAWG6n2lC
+CIH7SOA4o8D88FHEVANm5rcseeMq9LND9z7aOJ+CEdxyjN8lb+CZ9xGKGl/8+UG+
+1uUIB2UqX1RuowIL3xLi7T5hTh0rGNP58tQhv5Y/6DjiZM11CAnhxWa1BRiCXMlK
+rwIDAQAB
+-----END PUBLIC KEY-----"""
 LICENSE_CACHE_PATH = Path("settings/license_cache.json")
 LICENSE_TOKEN_TTL_GRACE_SECONDS = 5
 
@@ -901,18 +909,18 @@ class App(customtkinter.CTk):
     def _load_public_key(self):
         try:
             if LICENSE_EMBEDDED_PUBLIC_KEY_PEM.strip():
-                return rsa.PublicKey.load_pkcs1(LICENSE_EMBEDDED_PUBLIC_KEY_PEM.encode("utf-8"))
+                return rsa.PublicKey.load_pkcs1_openssl_pem(LICENSE_EMBEDDED_PUBLIC_KEY_PEM.encode("utf-8"))
             if LICENSE_PUBLIC_KEY_PATH.exists():
-                return rsa.PublicKey.load_pkcs1(LICENSE_PUBLIC_KEY_PATH.read_bytes())
+                return rsa.PublicKey.load_pkcs1_openssl_pem(LICENSE_PUBLIC_KEY_PATH.read_bytes())
             return None
         except Exception:
             return None
 
-    def _save_license_cache(self, signed_token):
+    def _save_license_cache(self, signed_token, hwid, exp):
         try:
             LICENSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
             LICENSE_CACHE_PATH.write_text(
-                json.dumps({"signed_token": signed_token, "saved_at": int(time.time())}, ensure_ascii=False),
+                json.dumps({"signed_token": signed_token, "hwid": hwid, "exp": int(exp), "saved_at": int(time.time())}, ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception:
@@ -931,7 +939,17 @@ class App(customtkinter.CTk):
                 return False
             cached = json.loads(LICENSE_CACHE_PATH.read_text(encoding="utf-8"))
             token = cached.get("signed_token")
+            cached_hwid = cached.get("hwid")
+            cached_exp = int(cached.get("exp", 0) or 0)
             if not token:
+                return False
+            if cached_hwid and cached_hwid != hwid:
+                self.log_manager.add_log("⚠️ Кэш лицензии отклонён: HWID не совпадает.")
+                self._clear_license_cache()
+                return False
+            if cached_exp and cached_exp <= int(time.time()):
+                self.log_manager.add_log("⚠️ Кэш лицензии просрочен.")
+                self._clear_license_cache()
                 return False
             payload = self._verify_signed_token(token, hwid, expected_nonce=None)
             self._apply_license_result(True, f"Офлайн кэш до {payload.get('expires_at', 'n/a')}")
@@ -941,24 +959,32 @@ class App(customtkinter.CTk):
             self._clear_license_cache()
             return False
 
-    def _request_license_challenge(self, hwid):
-        url = f"{LICENSE_SERVER_URL}/api/challenge"
-        response = self.http_session.get(url, params={"hwid": hwid, "ts": int(time.time())}, timeout=8)
+    def _request_license_state(self, hwid):
+        if LICENSE_SERVER_URL.lower().startswith("http://"):
+            self.log_manager.add_log("⚠️ LICENSE_SERVER_URL использует HTTP (без TLS). Используется защита подписью RSA.")
+
+        challenge = self._request_license_challenge(hwid)
+        url = f"{LICENSE_SERVER_URL}/api/check"
+        response = self.http_session.post(
+            url,
+            json={
+                "hwid": hwid,
+                "challenge_id": challenge["challenge_id"],
+                "nonce": challenge["nonce"],
+                "ts": int(time.time()),
+            },
+            timeout=8,
+        )
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict):
-            raise ValueError("Некорректный challenge от сервера")
+            raise ValueError("Некорректный ответ сервера лицензий")
 
-        nonce = data.get("nonce")
-        challenge_id = data.get("challenge_id")
-        expires_in = int(data.get("expires_in", LICENSE_CHALLENGE_TTL_SECONDS))
-        if not nonce or not challenge_id:
-            raise ValueError("Сервер не вернул nonce/challenge_id")
+        signed_token = data.get("signed_token") or data.get("token")
+        if signed_token:
+            return self._verify_signed_token(signed_token, hwid, challenge["nonce"])
 
-        self.license_nonce = nonce
-        self.license_challenge_id = challenge_id
-        self.license_challenge_exp = int(time.time()) + min(expires_in, LICENSE_CHALLENGE_TTL_SECONDS)
-        return {"nonce": nonce, "challenge_id": challenge_id}
+        raise ValueError(data.get("message") or "Сервер не вернул signed_token")
         
     def _verify_signed_token(self, signed_token, expected_hwid, expected_nonce=None):
         if not signed_token or '.' not in signed_token:
@@ -998,36 +1024,10 @@ class App(customtkinter.CTk):
         self.license_token = signed_token
         self.license_exp = exp
         self.license_nonce = payload.get('nonce')
-        self._save_license_cache(signed_token)
+        self._save_license_cache(signed_token, expected_hwid, exp)
         return payload
 
-    def _request_license_state(self, hwid):
-        if LICENSE_SERVER_URL.lower().startswith("http://"):
-            raise ValueError("Небезопасный LICENSE_SERVER_URL: требуется HTTPS")
 
-        challenge = self._request_license_challenge(hwid)
-        url = f"{LICENSE_SERVER_URL}/api/check"
-        response = self.http_session.get(url, params={'hwid': hwid, 'ts': int(time.time())}, timeout=8)
-        response = self.http_session.post(
-            url,
-            json={
-                "hwid": hwid,
-                "challenge_id": challenge["challenge_id"],
-                "nonce": challenge["nonce"],
-                "ts": int(time.time()),
-            },
-            timeout=8,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict):
-            raise ValueError('Некорректный ответ сервера лицензий')
-
-        signed_token = data.get('signed_token') or data.get('token')
-        if signed_token:
-            return self._verify_signed_token(signed_token, hwid, challenge["nonce"])
-
-        raise ValueError(data.get('message') or 'Сервер не вернул signed_token (legacy-ответы отключены)')
 
     def _validate_current_token(self):
         return int(time.time()) < int(self.license_exp) - LICENSE_TOKEN_TTL_GRACE_SECONDS
