@@ -3,7 +3,8 @@ import os
 import queue
 import re
 import subprocess
-
+import uuid
+import hashlib
 import sys
 
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import customtkinter
-
+import requests
 from Managers.AccountsManager import AccountManager
 from Managers.LogManager import LogManager
 from Managers.SettingsManager import SettingsManager
@@ -134,6 +135,7 @@ class App(customtkinter.CTk):
         self._ui_actions_queue = queue.SimpleQueue()
         self._pending_section = None
         self._section_switch_job = None
+        self.is_unlocked = False
         
         self.geometry("1100x600")
         self.minsize(1100, 600)
@@ -167,7 +169,8 @@ class App(customtkinter.CTk):
         self.show_section("license")
         self._start_ui_actions_pump()
         self._start_runtime_status_tracking()
-
+        self._start_background_check()
+        
     def _start_ui_actions_pump(self):
         def pump():
             try:
@@ -866,10 +869,123 @@ class App(customtkinter.CTk):
                 module.stop()
         except Exception:
             pass
+
+    def get_hwid(self):
+        mac = uuid.getnode()
+        return hashlib.sha256(str(mac).encode("utf-8")).hexdigest()[:20].upper()
+
+    def check_license_async(self, hwid):
+        self.log_manager.add_log(f"🔄 Проверка лицензии: {hwid}...")
+        self.license_status.configure(text="Статус: Проверка...", text_color=ACCENT_ORANGE)
+        self.executor.submit(self._do_check_request, hwid)
+
+    def _do_check_request(self, hwid):
+        server_ip = "77.91.96.154"
+        url = f"http://{server_ip}/api/check?hwid={hwid}"
+
+        try:
+            response = requests.get(url, timeout=5)
+            data = response.json()
+
+            if data.get("status") == "active":
+                msg = f"Активна до {data.get('expires_at')}"
+                self._queue_ui_action(lambda: self._apply_license_result(True, msg))
+            else:
+                msg = data.get("message", "Ошибка лицензии")
+                self._queue_ui_action(lambda: self._apply_license_result(False, msg))
+        except Exception:
+            self._queue_ui_action(lambda: self._apply_license_result(False, "Сервер недоступен"))
+
+    def _start_background_check(self):
+        if getattr(self, "is_unlocked", False):
+            my_hwid = self.get_hwid()
+            self.executor.submit(self._do_silent_check, my_hwid)
+
+        if self.winfo_exists():
+            self.after(60000, self._start_background_check)
+
+    def _do_silent_check(self, hwid):
+        server_ip = "77.91.96.154"
+        url = f"http://{server_ip}/api/check?hwid={hwid}"
+
+        try:
+            response = requests.get(url, timeout=5)
+            data = response.json()
+
+            if data.get("status") != "active" and self.is_unlocked:
+                msg = data.get("message", "Лицензия отозвана")
+                self._queue_ui_action(lambda: self._apply_license_result(False, msg))
+                self._queue_ui_action(
+                    lambda: self.log_manager.add_log("⚠️ Сеанс прерван: подписка истекла или аннулирована админом.")
+                )
+        except Exception:
+            pass
+
+    def _apply_license_result(self, is_valid, message):
+        self.is_unlocked = is_valid
+
+        if is_valid:
+            self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_GREEN)
+            self.log_manager.add_log("✅ Лицензия подтверждена сервером!")
+            self.show_section(self._pending_section or "license")
+        else:
+            self.license_status.configure(text=f"Статус: {message}", text_color=ACCENT_RED)
+            self.log_manager.add_log(f"❌ Лицензия отклонена: {message}")
+            self.show_section("license")
+            
     def _build_license_section(self, parent):
         frame = customtkinter.CTkFrame(parent, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BG_BORDER)
         frame.grid_columnconfigure(0, weight=1)
-        customtkinter.CTkLabel(frame, text="License", font=customtkinter.CTkFont(size=30, weight="bold"), text_color=TXT_MAIN).grid(row=0, column=0, padx=16, pady=(20, 8), sticky="w")
+
+        customtkinter.CTkLabel(
+            frame,
+            text="License",
+            font=customtkinter.CTkFont(size=30, weight="bold"),
+            text_color=TXT_MAIN,
+        ).grid(row=0, column=0, padx=16, pady=(20, 8), sticky="w")
+
+        self.license_status = customtkinter.CTkLabel(
+            frame,
+            text="Статус: Ожидание...",
+            text_color=ACCENT_ORANGE,
+            font=customtkinter.CTkFont(size=14, weight="bold"),
+        )
+        self.license_status.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
+
+        block = customtkinter.CTkFrame(frame, fg_color=BG_CARD_ALT, corner_radius=8, border_width=1, border_color=BG_BORDER)
+        block.grid(row=2, column=0, padx=16, pady=8, sticky="ew")
+        block.grid_columnconfigure(0, weight=1)
+
+        customtkinter.CTkLabel(block, text="Ваш HWID:", text_color=TXT_SOFT).grid(row=0, column=0, padx=10, pady=(8, 2), sticky="w")
+
+        hwid_entry = customtkinter.CTkEntry(block, height=34)
+        hwid_entry.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="ew")
+
+        my_hwid = self.get_hwid()
+        hwid_entry.insert(0, my_hwid)
+        hwid_entry.configure(state="readonly")
+
+        customtkinter.CTkButton(
+            block,
+            text="Копировать",
+            width=100,
+            height=34,
+            fg_color=ACCENT_BLUE,
+            hover_color=ACCENT_BLUE_DARK,
+            command=lambda: [self.clipboard_clear(), self.clipboard_append(my_hwid), self.log_manager.add_log("📋 HWID скопирован")],
+        ).grid(row=1, column=1, padx=(0, 10), pady=(0, 8))
+
+        customtkinter.CTkButton(
+            block,
+            text="Проверить",
+            width=100,
+            height=34,
+            fg_color=ACCENT_GREEN,
+            hover_color="#177a42",
+            command=lambda: self.check_license_async(my_hwid),
+        ).grid(row=1, column=2, padx=(0, 10), pady=(0, 8))
+
+        self.check_license_async(my_hwid)
         return frame
 
     def _build_stats_section(self, parent):
@@ -1315,21 +1431,33 @@ class App(customtkinter.CTk):
     def show_section(self, section_key):
         self._pending_section = section_key
 
-        for key, button in self.nav_buttons.items():
-            is_selected = key == section_key
+        # Обновляем состояние и стиль кнопок в сайдбаре
+        for k, button in self.nav_buttons.items():
+            is_selected = (k == section_key)
+
+            # Если лицензия не активна — разрешаем только вкладку License
+            if (not getattr(self, "is_unlocked", False)) and k != "license":
+                btn_state = "disabled"
+            else:
+                btn_state = "normal"
+
             button.configure(
-                state="disabled" if is_selected else "normal",
+                state=btn_state,
                 fg_color=BG_CARD if is_selected else BG_CARD_ALT,
                 border_color=ACCENT_GREEN if is_selected else ACCENT_RED,
             )
 
+        # Отложенное переключение секции (анти-дребезг)
         if self._section_switch_job is not None:
             try:
                 self.after_cancel(self._section_switch_job)
             except Exception:
                 pass
 
-        self._section_switch_job = self.after(85, lambda: self._apply_section_switch(self._pending_section))
+        self._section_switch_job = self.after(
+            85,
+            lambda: self._apply_section_switch(self._pending_section)
+    )
     def _log_startup_gpu_info(self, startup_gpu_info):
         if not startup_gpu_info:
             return
