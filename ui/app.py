@@ -144,7 +144,7 @@ class SteamRouteManager:
 class App(customtkinter.CTk):
     def __init__(self, gsi_manager=None, startup_gpu_info=None):
         super().__init__()
-        self.title("Goose Panel | v.4.0.3")
+        self.title("Goose Panel | v.4.0.4")
         self.gsi_manager = gsi_manager
         self.window_position_file = Path("window_position.txt")
         self.executor = ThreadPoolExecutor(max_workers=8)
@@ -153,6 +153,8 @@ class App(customtkinter.CTk):
         self._ui_actions_queue = queue.SimpleQueue()
         self._pending_section = None
         self._section_switch_job = None
+        self._active_section = None
+        self._accounts_scroll_fix_job = None
 
         self.is_unlocked = False
         self.license_token = None
@@ -370,7 +372,8 @@ class App(customtkinter.CTk):
             "license": self._build_license_section(self.content),
             "stats": self._build_stats_section(self.content),
         }
-
+        for frame in self.sections.values():
+            frame.grid(row=0, column=0, sticky="nsew")
     def _run_hidden_cmd(self, cmd, check=False):
         return subprocess.run(
             cmd,
@@ -512,6 +515,7 @@ class App(customtkinter.CTk):
         self.accounts_scroll = customtkinter.CTkScrollableFrame(accounts_block, fg_color=BG_CARD_ALT)
         self.accounts_scroll.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
         self.accounts_scroll.grid_columnconfigure(0, weight=1)
+        self._setup_accounts_scroll_stabilizer()
         self._create_account_rows()
 
         self.srt_placeholder = customtkinter.CTkFrame(main, width=260, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BG_BORDER)
@@ -639,6 +643,58 @@ class App(customtkinter.CTk):
             )
             self._refresh_account_badge(account)
 
+        self._schedule_accounts_scroll_repair(delay_ms=0)
+
+    def _setup_accounts_scroll_stabilizer(self):
+        canvas = getattr(self.accounts_scroll, "_parent_canvas", None)
+        scrollbar = getattr(self.accounts_scroll, "_scrollbar", None)
+
+        if canvas:
+            for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
+                canvas.bind(event, lambda _event: self._schedule_accounts_scroll_repair(), add="+")
+
+        if scrollbar:
+            for event in ("<B1-Motion>", "<ButtonRelease-1>"):
+                scrollbar.bind(event, lambda _event: self._schedule_accounts_scroll_repair(), add="+")
+
+    def _schedule_accounts_scroll_repair(self, delay_ms=80):
+        if not self.winfo_exists():
+            return
+
+        if self._accounts_scroll_fix_job:
+            try:
+                self.after_cancel(self._accounts_scroll_fix_job)
+            except Exception:
+                pass
+
+        self._accounts_scroll_fix_job = self.after(delay_ms, self._repair_accounts_scroll_view)
+
+    def _repair_accounts_scroll_view(self):
+        self._accounts_scroll_fix_job = None
+
+        if not self.winfo_exists() or not hasattr(self, "accounts_scroll"):
+            return
+
+        canvas = getattr(self.accounts_scroll, "_parent_canvas", None)
+        if not canvas:
+            return
+
+        try:
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+            first, last = canvas.yview()
+            if first < 0:
+                canvas.yview_moveto(0.0)
+            elif first > 1:
+                canvas.yview_moveto(1.0)
+            elif first == last and bbox:
+                # Защита от "пустого" кадра: удерживаем валидную позицию скролла
+                canvas.yview_moveto(min(max(first, 0.0), 1.0))
+        except Exception:
+            pass
+            
     def _refresh_level_labels(self):
         try:
             if hasattr(self.accounts_list, "_load_levels_from_json"):
@@ -766,6 +822,8 @@ class App(customtkinter.CTk):
             else:
                 item["row"].grid_remove()
 
+        self._schedule_accounts_scroll_repair()
+        
     def _toggle_account(self, account):
         if account in self.account_manager.selected_accounts:
             self.account_manager.selected_accounts.remove(account)
@@ -821,7 +879,7 @@ class App(customtkinter.CTk):
             switches_card,
             row=2,
             title="Auto match in start",
-            description="После 4 окон CS2 ждёт 25с и начинает игру.",
+            description="После 4 запуска CS2 ждёт 25с и начинает игру.",
             setting_key="AutoMatchInStartEnabled",
             default=True,
         )
@@ -1752,21 +1810,29 @@ class App(customtkinter.CTk):
 
     # ---------------- Navigation ----------------
     def _apply_section_switch(self, section_key):
-        for key, frame in self.sections.items():
-            if key == section_key:
-                frame.grid(row=0, column=0, sticky="nsew")
-            else:
-                frame.grid_remove()
+        target_section = section_key if section_key in self.sections else "license"
+        if self._active_section == target_section:
+            self._pending_section = None
+            self._section_switch_job = None
+            return
+
+        target_frame = self.sections[target_section]
+        target_frame.tkraise()
+        self._active_section = target_section
 
         for key, button in self.nav_buttons.items():
-            button.configure(
-                fg_color=BG_CARD if key == section_key else BG_CARD_ALT,
-                border_color=ACCENT_GREEN if key == section_key else ACCENT_RED,
-            )
+            is_target = (key == target_section)
+            button.configure(fg_color=BG_CARD if is_target else BG_CARD_ALT, border_color=ACCENT_GREEN if is_target else ACCENT_RED)
         self._pending_section = None
         self._section_switch_job = None
 
+        
     def show_section(self, section_key):
+        if section_key not in self.sections:
+            section_key = "license"
+
+        if self._active_section == section_key:
+            return
         self._pending_section = section_key
 
         for k, button in self.nav_buttons.items():
@@ -1788,7 +1854,7 @@ class App(customtkinter.CTk):
             except Exception:
                 pass
 
-        self._section_switch_job = self.after(85, lambda: self._apply_section_switch(self._pending_section))
+        self._section_switch_job = self.after(16, lambda: self._apply_section_switch(self._pending_section))
 
     # ---------------- Misc ----------------
     def _log_startup_gpu_info(self, startup_gpu_info):
