@@ -255,7 +255,6 @@ class LobbyManager:
             if self._is_cancelled():
                 return False
 
-
             try:
                 hwnd = self._resolve_account_cs2_hwnd(member)
                 if not hwnd or not win32gui.IsWindow(hwnd):
@@ -290,9 +289,7 @@ class LobbyManager:
 
         moved = self.MoveWindows(ordered_logins=random_order_logins)
         if moved:
-            self._logManager.add_log(
-                f"🔀 Shuffle выполнен"
-            )
+            self._logManager.add_log("🔀 Shuffle выполнен")
         return moved
 
     def _auto_create_lobbies(self):
@@ -352,10 +349,11 @@ class LobbyManager:
         self.team2 = LobbyInstance(leader2, [bot2])
         self._last_window_order_logins = [acc.login for acc in top4_accounts]
 
+        return True
+
     def _prepare_strict_4_windows_flow(self):
         """Подготовка без дополнительных пауз: move all -> align -> strict check."""
-        moved_count = self.lift_all_cs2_windows()
-
+        self.lift_all_cs2_windows()
 
         top4 = self._get_strict_4_accounts_by_window_order()
         if not top4:
@@ -508,8 +506,10 @@ class LobbyManager:
 
         return (r_sum // count, g_sum // count, b_sum // count)
 
-    @staticmethod
-    def _safe_set_foreground(hwnd):
+    def _safe_activate_hwnd(self, hwnd):
+        """
+        Более простой и стабильный foreground-activation по HWND.
+        """
         if not hwnd:
             return False
 
@@ -542,39 +542,66 @@ class LobbyManager:
             except Exception:
                 hwnd_tid = 0
 
+            user32 = ctypes.windll.user32
+
             if fg_tid and hwnd_tid and fg_tid != hwnd_tid:
                 try:
-                    win32process.AttachThreadInput(fg_tid, hwnd_tid, True)
+                    user32.AttachThreadInput(fg_tid, hwnd_tid, True)
                     attached = True
                 except Exception:
                     attached = False
-
-            # Окно могло исчезнуть между вызовами — проверяем повторно.
-            if not win32gui.IsWindow(hwnd):
-                return False
 
             try:
                 win32gui.BringWindowToTop(hwnd)
             except Exception:
                 pass
 
-            if not win32gui.IsWindow(hwnd):
-                return False
-
             try:
                 win32gui.SetForegroundWindow(hwnd)
             except Exception:
                 return False
 
+            time.sleep(0.12)
             return True
+
         except Exception:
             return False
+
         finally:
             if attached and fg_tid and hwnd_tid and fg_tid != hwnd_tid:
                 try:
-                    win32process.AttachThreadInput(fg_tid, hwnd_tid, False)
+                    ctypes.windll.user32.AttachThreadInput(fg_tid, hwnd_tid, False)
                 except Exception:
                     pass
+
+    def _safe_set_foreground(self, hwnd):
+        return self._safe_activate_hwnd(hwnd)
+
+    def _activate_hwnd_for_input(self, hwnd):
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return False
+
+        if not self._safe_activate_hwnd(hwnd):
+            return False
+
+        try:
+            rect = win32gui.GetWindowRect(hwnd)
+            x = rect[0] + 120
+            y = rect[1] + 80
+            win32api.SetCursorPos((x, y))
+            time.sleep(0.05)
+        except Exception:
+            pass
+
+        return True
+
+    def _send_esc(self, hwnd):
+        try:
+            win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
+            win32api.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
+            return True
+        except Exception:
+            return False
 
     def lift_all_cs2_windows(self):
         try:
@@ -614,7 +641,7 @@ class LobbyManager:
                     return True
 
                 processed.add(pid)
-                self._safe_set_foreground(hwnd)
+                self._safe_activate_hwnd(hwnd)
                 lifted += 1
                 time.sleep(0.05)
             except Exception:
@@ -625,50 +652,91 @@ class LobbyManager:
         return lifted
 
     def press_esc_all_cs2_windows(self):
-        """Нажимает ESC два раза в КАЖДОМ найденном окне cs2.exe перед запуском лобби-потока."""
-        cs2_pids = [
-            p.info['pid'] for p in psutil.process_iter(['pid', 'name'])
-            if (p.info.get('name') or "").lower() == "cs2.exe"
-        ]
+        cs2_pids = []
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if (proc.info.get('name') or '').lower() == 'cs2.exe':
+                    cs2_pids.append(int(proc.info['pid']))
+            except Exception:
+                continue
+
         if not cs2_pids:
+            self._logManager.add_log("⚠️ cs2.exe процессы не найдены")
             return 0
 
-        seen = set()
-        count = 0
+        hwnd_list = []
 
         def enum_cb(hwnd, _):
-            nonlocal count
-            if self._is_cancelled():
-                return False
             try:
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                if pid not in cs2_pids:
+                if not win32gui.IsWindow(hwnd):
                     return True
                 if not win32gui.IsWindowVisible(hwnd):
                     return True
-                if hwnd in seen:
+                if win32gui.GetParent(hwnd) != 0:
                     return True
 
-                seen.add(hwnd)
-                self._safe_set_foreground(hwnd)
-                if self._sleep_with_cancel(0.1):
-                    return False
+                _, hwnd_pid = win32process.GetWindowThreadProcessId(hwnd)
+                if hwnd_pid not in cs2_pids:
+                    return True
 
-                for _ in range(2):
-                    win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
-                    if self._sleep_with_cancel(0.05):
-                        return False
-                    win32api.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
-                    if self._sleep_with_cancel(0.1):
-                        return False
+                rect = win32gui.GetWindowRect(hwnd)
+                width = max(0, rect[2] - rect[0])
+                height = max(0, rect[3] - rect[1])
+                area = width * height
+                if area <= 0:
+                    return True
 
-                count += 1
+                hwnd_list.append((rect[0], rect[1], hwnd_pid, hwnd))
             except Exception:
                 pass
             return True
 
-        win32gui.EnumWindows(enum_cb, None)
-        return count
+        try:
+            win32gui.EnumWindows(enum_cb, None)
+        except Exception as e:
+            self._logManager.add_log(f"❌ EnumWindows error: {e}")
+            return 0
+
+        if not hwnd_list:
+            self._logManager.add_log("⚠️ Не найдено hwnd окон CS2")
+            return 0
+
+        hwnd_list.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        processed = 0
+
+        for _, _, pid, hwnd in hwnd_list:
+            if self._is_cancelled():
+                return processed
+
+            if not win32gui.IsWindow(hwnd):
+                continue
+
+            if not self._activate_hwnd_for_input(hwnd):
+                self._logManager.add_log(f"⚠️ Не удалось активировать hwnd={hwnd} pid={pid}")
+                continue
+
+            if self._sleep_with_cancel(0.15):
+                return processed
+
+            if not self._send_esc(hwnd):
+                self._logManager.add_log(f"⚠️ ESC #1 не отправлен в hwnd={hwnd}")
+                continue
+
+            if self._sleep_with_cancel(0.2):
+                return processed
+
+            if not self._send_esc(hwnd):
+                self._logManager.add_log(f"⚠️ ESC #2 не отправлен в hwnd={hwnd}")
+                continue
+
+            if self._sleep_with_cancel(0.2):
+                return processed
+
+            processed += 1
+        
+
+        return processed
 
     def _press_red_buttons_everywhere(self, final_click_pos, enforce_green=False, max_wait=12.0, leaders_only=False):
         from PIL import ImageGrab
@@ -690,7 +758,7 @@ class LobbyManager:
         def click_rel(x, y, rect, hwnd):
             if self._is_cancelled():
                 return False
-            self._safe_set_foreground(hwnd)
+            self._safe_activate_hwnd(hwnd)
             abs_x = rect[0] + x
             abs_y = rect[1] + y
             win32api.SetCursorPos((abs_x, abs_y))
@@ -745,7 +813,7 @@ class LobbyManager:
                 if state is None:
                     all_green = False
                     if not warned_unknown:
-                        self._logManager.add_log("⚠️ Не удалось определить цвет кнопки в одном из окон CS2")
+                 
                         warned_unknown = True
                     continue
 
@@ -764,7 +832,7 @@ class LobbyManager:
                 return True
 
             if time.time() >= deadline:
-                self._logManager.add_log("⚠️ Не удалось перевести все кнопки в зеленый за отведенное время")
+      
                 return False
 
             if not any_red and self._sleep_with_cancel(0.15):
@@ -777,8 +845,7 @@ class LobbyManager:
         if not self._press_red_buttons_everywhere(final_click_pos, enforce_green=True, max_wait=20.0, leaders_only=True):
             return False
 
-        esc_count = self.press_esc_all_cs2_windows()
-        self._logManager.add_log(f"⌨️ Recovery: ESC x2 sent to {esc_count} CS2 windows")
+        self.press_esc_all_cs2_windows()
         if self._is_cancelled():
             return False
 
@@ -799,13 +866,19 @@ class LobbyManager:
     # Main flow (по ТЗ)
     # -----------------------------
     def MakeLobbiesAndSearchGame(self):
-
         from PIL import ImageGrab
         from Modules.AutoAcceptModule import AutoAcceptModule
 
         AutoAcceptModule.reset_final_clicks_state()
 
-        # Жёсткая подготовка 4 окон по ТЗ: 40с -> move all -> align -> strict check -> 10с
+        self.press_esc_all_cs2_windows()
+
+        if self._is_cancelled():
+            return False
+
+        if self._sleep_with_cancel(0.4):
+            return False
+
         if not self._prepare_strict_4_windows_flow():
             return False
 
@@ -819,7 +892,7 @@ class LobbyManager:
         def click_rel(x, y, rect, hwnd):
             if self._is_cancelled():
                 return False
-            self._safe_set_foreground(hwnd)
+            self._safe_activate_hwnd(hwnd)
             abs_x = rect[0] + x
             abs_y = rect[1] + y
             win32api.SetCursorPos((abs_x, abs_y))
@@ -868,12 +941,12 @@ class LobbyManager:
 
         for cycle in range(1, max_cycles + 1):
             if AutoAcceptModule.final_clicks_disabled():
-                self._logManager.add_log("✅ Match already detected. Stopping lobby/search cycle immediately.")
                 return True
 
             self._logManager.add_log(f"🚀 Start cycle {cycle}/{max_cycles}")
 
             self.press_esc_all_cs2_windows()
+
             if self._is_cancelled():
                 return False
 
@@ -919,7 +992,7 @@ class LobbyManager:
                     self._logManager.add_log("❌ Не удалось получить окно лидера для стартовых кликов")
                     return False
 
-                self._safe_set_foreground(info["hwnd"])
+                self._safe_activate_hwnd(info["hwnd"])
                 if self._sleep_with_cancel(0.25):
                     return False
 
