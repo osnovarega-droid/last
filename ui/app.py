@@ -2487,7 +2487,7 @@ class AccountsControl(customtkinter.CTkTabview):
         with self._start_sequence_lock:
             if self._start_sequence_active:
                 self._start_sequence_cancel_event.set()
-                self._logManager.add_log("Запуск аккаунтов завершен")
+
             self._start_sequence_active = True
 
         steam_path = self._settingsManager.get(
@@ -3858,7 +3858,7 @@ class MainMenu(customtkinter.CTkTabview):
             "Make lobbies": "Make lobbies",
             "Disband lobbies": "Disband lobbies",
             "Shuffle lobbies": "Shuffle lobbies",
-            "Make lobbies & Search game": "Make lobbies & Search game",
+            "Make lobbies & Search game": "Make lobbies & Search game canceled",
         }
         return mapping.get(action_name or "", "Canceled action")
 
