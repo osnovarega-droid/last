@@ -2353,6 +2353,7 @@ class AccountsControl(customtkinter.CTkTabview):
         self._stat_lock = threading.Lock()
         self._start_sequence_lock = threading.Lock()
         self._start_sequence_active = False
+        self._start_sequence_cancel_event = threading.Event()
         self._ctrlq_hotkey_handle = None
         self._settingsManager = SettingsManager()
         self._logManager = LogManager()
@@ -2485,8 +2486,8 @@ class AccountsControl(customtkinter.CTkTabview):
     def start_selected(self): 
         with self._start_sequence_lock:
             if self._start_sequence_active:
-                self._logManager.add_log("⚠️ Процесс запуска уже выполняется. Дождитесь завершения")
-                return
+                self._start_sequence_cancel_event.set()
+                self._logManager.add_log("Запуск аккаунтов завершен")
             self._start_sequence_active = True
 
         steam_path = self._settingsManager.get(
@@ -2519,7 +2520,10 @@ class AccountsControl(customtkinter.CTkTabview):
 
         self.auto_cancelled = False
         self.auto_cancelled_by_user = False
-
+        start_sequence_cancel_event = threading.Event()
+        self._start_sequence_cancel_event = start_sequence_cancel_event
+        def finish_current_start_sequence():
+            self._finish_start_sequence(start_sequence_cancel_event)
         self.accountsManager.begin_start_selected_batch(len(accounts_to_start))
         for acc in accounts_to_start:
             self.accountsManager.add_to_start_queue(acc)
@@ -2542,13 +2546,13 @@ class AccountsControl(customtkinter.CTkTabview):
                 time.sleep(0.5)
 
             self._unregister_ctrlq_hotkey()
-            self._finish_start_sequence()
+            finish_current_start_sequence()
 
         threading.Thread(target=check_cancellation_loop, daemon=True).start()
 
         if self.auto_cancelled:
             self._logManager.add_log("Start game canceled")
-            self._finish_start_sequence()
+            finish_current_start_sequence()
             return
 
         try:
@@ -2557,7 +2561,7 @@ class AccountsControl(customtkinter.CTkTabview):
                 def on_move_complete():
                     if self.auto_cancelled:
                         self._logManager.add_log("🛑 Lobbies отменены")
-                        self._finish_start_sequence()
+                        finish_current_start_sequence()
                         return
 
                     auto_match_enabled = bool(self._settingsManager.get("AutoMatchInStartEnabled", True))
@@ -2576,7 +2580,7 @@ class AccountsControl(customtkinter.CTkTabview):
                         except Exception as e:
                             self._logManager.add_log(f"❌ Lobbies error: {e}")
                         finally:
-                            self._finish_start_sequence()
+                            finish_current_start_sequence()
 
                     def delay_and_schedule():
                         delay_seconds = 10
@@ -2585,7 +2589,7 @@ class AccountsControl(customtkinter.CTkTabview):
                         while waited < delay_seconds:
                             if self.auto_cancelled:
                                 self._logManager.add_log("🛑 Lobbies/Search отменены")
-                                self._finish_start_sequence()
+                                finish_current_start_sequence()
                                 return
                             time.sleep(step)
                             waited += step
@@ -2597,27 +2601,39 @@ class AccountsControl(customtkinter.CTkTabview):
                     app.control_frame.auto_move_after_4_cs2(
                         delay=25,
                         callback=on_move_complete,
-                        cancel_check=lambda: self.auto_cancelled
+                        cancel_check=lambda: self.auto_cancelled or start_sequence_cancel_event.is_set()
                     )
                 else:
                     self._logManager.add_log("Start game canceled")
-                    self._finish_start_sequence()
+                    finish_current_start_sequence()
             else:
                 self._logManager.add_log("⚠️ control_frame not found in App")
-                self._finish_start_sequence()
+                finish_current_start_sequence()
         except Exception as e:
             self._logManager.add_log(f"❌ Auto sequence error: {e}")
-            self._finish_start_sequence()
+            finish_current_start_sequence()
 
-    def _finish_start_sequence(self):
+    def _finish_start_sequence(self, cancel_event=None):
+        if cancel_event is None:
+            cancel_event = self._start_sequence_cancel_event
+
+        cancel_event.set()
+        self._start_sequence_cancel_event.set()
         with self._start_sequence_lock:
-            self._start_sequence_active = False
+            if cancel_event is self._start_sequence_cancel_event:
+                self._start_sequence_active = False
 
     def _global_ctrlq_callback(self):
         """🔥 Глобальный Ctrl+Q обработчик"""
         self.auto_cancelled = True
         self.auto_cancelled_by_user = True
-
+        try:
+            app = self.winfo_toplevel()
+            main_menu = getattr(app, "main_menu", None)
+            if main_menu is not None:
+                main_menu._cancel_requested = True
+        except Exception:
+            pass
     def _register_ctrlq_hotkey(self):
         self._unregister_ctrlq_hotkey()
         self._ctrlq_hotkey_handle = keyboard.add_hotkey('ctrl+q', self._global_ctrlq_callback)
@@ -3700,7 +3716,7 @@ class ControlFrame(customtkinter.CTkFrame):
 
         while True:
             if cancel_check and cancel_check():
-                self.logManager.add_log("🛑 Auto move отменён")
+ 
                 return
 
             cs2_pids = list(self._get_active_cs2_pids())
@@ -3889,7 +3905,7 @@ class MainMenu(customtkinter.CTkTabview):
         original_text = button.cget("text")
         self._active_action_name = button_text
         self._cancel_notified_for_action = None
-        self._cancel_requested = False
+
         self._set_all_buttons_state("disabled")
         self._countdown_step(button, action, original_text, countdown, message, message_in_run, message_time)
 
@@ -3945,7 +3961,7 @@ class MainMenu(customtkinter.CTkTabview):
         button.configure(text=original_text)
         self._set_all_buttons_state("normal")
         self._active_action_name = None
-
+        self._cancel_requested = False
     # -----------------------------
     # Button actions
     # -----------------------------
