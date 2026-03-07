@@ -2583,7 +2583,7 @@ class AccountsControl(customtkinter.CTkTabview):
             for acc in accounts:
                 try:
                     steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
-                    html = self._fetch_html(steam, url_suffix="gcpd/730")
+                    html = self._fetch_html_with_retry(steam, url_suffix="gcpd/730")
                     if not html:
                         continue
                     rank_match = re.search(r'CS:GO Profile Rank:\s*([^\n<]+)', html)
@@ -2613,7 +2613,7 @@ class AccountsControl(customtkinter.CTkTabview):
                     steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
                     html = self._fetch_html(steam, url_suffix="gcpd/730")
                     if not html:
-                        self._logManager.add_log(f"[{acc.login}] ❌ No HTML")
+                        self._logManager.add_log(f"[{acc.login}] Ошибка парснига")
                         continue
 
                     print(f"⏳ [{acc.login}] Wait for JS...")
@@ -2754,19 +2754,25 @@ class AccountsControl(customtkinter.CTkTabview):
         return True
         
     # ----------------- Helper Methods -----------------
+    def _fetch_html_with_retry(self, steam, url_suffix="gcpd/730/?tab=matchmaking", retries=3):
+        for _ in range(retries):
+            html = self._fetch_html(steam, url_suffix=url_suffix)
+            if html:
+                return html
+        return None
     def _fetch_html(self, steam, url_suffix="gcpd/730/?tab=matchmaking"):
         try:
             steam.login()
-        except Exception as e:
-            self._logManager.add_log(f"[{steam.login}] ❌ Failed to login: {e}")
+
+        except Exception:
             return None
         try:
             resp = steam.session.get(f'https://steamcommunity.com/profiles/{steam.steamid}/{url_suffix}', timeout=10)
-        except Exception as e:
-            self._logManager.add_log(f"[{steam.login}] ❌ Failed to fetch page: {e}")
+
+        except Exception:
             return None
         if resp.status_code != 200:
-            self._logManager.add_log(f"[{steam.login}] ❌ HTTP {resp.status_code}")
+
             return None
         return resp.text
 
@@ -2779,14 +2785,17 @@ class AccountsControl(customtkinter.CTkTabview):
         def worker():
             for acc in self.accountsManager.selected_accounts:
                 steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
-                html = self._fetch_html(steam)
-                if not html:
-                    continue
-                match = re.search(
-                    r'<td>Premier</td><td>(\d+)</td><td>(\d+)</td><td>(\d+)</td><td>([^<]*)</td>',
-                    html
-                )
-                if match:
+                parsed = False
+                for _ in range(3):
+                    html = self._fetch_html(steam)
+                    if not html:
+                        continue
+                    match = re.search(
+                        r'<td>Wingman</td><td>(\d+)</td><td>(\d+)</td><td>(\d+)</td><td>([^<]*)</td>',
+                        html
+                    )
+                    if not match:
+                        continue
                     wins, ties, losses = int(match.group(1)), int(match.group(2)), int(match.group(3))
                     skill = match.group(4).strip()
                     skill = int(skill) if skill.isdigit() else -1
@@ -2811,8 +2820,12 @@ class AccountsControl(customtkinter.CTkTabview):
                     skill = match.group(4).strip()
                     skill = int(skill) if skill.isdigit() else -1
                     self._logManager.add_log(f"[{acc.login}] Wingman: W:{wins} T:{ties} L:{losses} R:{skill}")
-                else:
-                    self._logManager.add_log(f"[{acc.login}] ⚠ Wingman stats not found")
+
+                    parsed = True
+                    break
+
+                if not parsed:
+                    self._logManager.add_log(f"[{acc.login}] Ошибка парснига")
         self._run_stat_with_lock(worker)
 
     def try_get_mapStats(self):
