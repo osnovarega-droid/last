@@ -2537,16 +2537,15 @@ class AccountsControl(customtkinter.CTkTabview):
         self._register_ctrlq_hotkey()
 
         def check_cancellation_loop():
-            timeout = 120
-            start_time = time.time()
-            while time.time() - start_time < timeout:
+            while not start_sequence_cancel_event.is_set():
                 if self.auto_cancelled:
                     self._logManager.add_log("Start game canceled")
+                    finish_current_start_sequence()
                     break
                 time.sleep(0.5)
 
             self._unregister_ctrlq_hotkey()
-            finish_current_start_sequence()
+
 
         threading.Thread(target=check_cancellation_loop, daemon=True).start()
 
