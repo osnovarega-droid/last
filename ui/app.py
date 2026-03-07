@@ -18,11 +18,7 @@ import requests
 from Managers.AccountsManager import AccountManager
 from Managers.LogManager import LogManager
 from Managers.SettingsManager import SettingsManager
-from .accounts_list_frame import AccountsListFrame
-from .accounts_tab import AccountsControl
-from .config_tab import ConfigTab
-from .control_frame import ControlFrame
-from .main_menu import MainMenu
+
 
 customtkinter.set_appearance_mode("Dark")
 customtkinter.set_default_color_theme("blue")
@@ -1872,3 +1868,2108 @@ class App(customtkinter.CTk):
 if __name__ == "__main__":
     app = App()
     app.mainloop()
+    
+# ===== Inlined from ui/accounts_list_frame.py =====
+import customtkinter
+import json
+from pathlib import Path
+import os
+import queue
+from datetime import datetime, timedelta
+
+from Managers.AccountsManager import AccountManager
+
+class AccountsListFrame(customtkinter.CTkFrame):
+    def __init__(self, parent):
+        super().__init__(parent)
+
+        self.accountsManager = AccountManager()
+        self.control_frame = None
+
+        # ✅ Очередь UI задач (важно: создаём СРАЗУ)
+        self._ui_queue = queue.Queue()
+        self.after(50, self._process_ui_queue)
+
+        # 🆕 ПУТЬ К ФАЙЛУ ОТФАРМЛЕННЫХ
+        self.farmed_file = Path("settings/accs_list.txt")
+        self.farmed_file.parent.mkdir(exist_ok=True)
+
+        self.levels_cache = self._load_levels_from_json()
+        self.farmed_accounts = self._load_farmed_accounts()
+
+        print(f"✅ Загружено {len(self.levels_cache)} уровней из level.json")
+        print(f"🟠 Загружено {len(self.farmed_accounts)} отфармленных аккаунтов")
+
+        # Фрейм для метки
+        self.top_frame = customtkinter.CTkFrame(self, fg_color="transparent")
+        self.top_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        self.top_frame.grid_columnconfigure(0, weight=1)
+
+        self.label_text = customtkinter.CTkLabel(
+            self.top_frame,
+            text=self._get_label_text(),
+            font=customtkinter.CTkFont(size=14),
+            fg_color="#3c3f41",
+            corner_radius=8,
+            height=30
+        )
+        self.label_text.grid(row=0, column=0, sticky="ew")
+
+        # Scrollable content
+        self.scrollable_content = customtkinter.CTkScrollableFrame(self, fg_color="transparent")
+        self.scrollable_content.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.scrollable_content.grid_columnconfigure(0, weight=1)
+        self.scrollable_content.grid_rowconfigure(0, weight=1)
+
+        self.switches = []
+        self.level_labels = []
+        self.account_switches = []
+
+        self._create_switches()
+
+        # ✅ чтобы не дергать UI слишком рано — применяем цвета после старта mainloop
+        self.after(0, self._apply_farmed_colors)
+
+    def _get_weekly_window_start(self, now=None):
+        current_time = now or datetime.now()
+        reset_anchor = current_time.replace(hour=3, minute=0, second=0, microsecond=0)
+        days_since_reset = (current_time.weekday() - 2) % 7
+        week_start = reset_anchor - timedelta(days=days_since_reset)
+        if current_time < week_start:
+            week_start -= timedelta(days=7)
+        return week_start.isoformat()
+
+    def is_drop_ready_login(self, login):
+        account_data = self.levels_cache.get(login, self.levels_cache.get(login.lower(), {}))
+        if not isinstance(account_data, dict):
+            return False
+        return account_data.get("drop_ready_week_start") == self._get_weekly_window_start()
+
+    def is_drop_ready_account(self, account):
+        return self.is_drop_ready_login(account.login)
+
+    def set_drop_ready(self, login, value=True):
+        account_data = self.levels_cache.get(login, self.levels_cache.get(login.lower(), {}))
+        if not isinstance(account_data, dict):
+            account_data = {}
+
+        if value:
+            account_data["drop_ready_week_start"] = self._get_weekly_window_start()
+        else:
+            account_data.pop("drop_ready_week_start", None)
+
+        self.levels_cache[login] = account_data
+        self._save_levels_to_json()
+
+    def is_reserved_from_rotation(self, account):
+        return self.is_farmed_account(account) or self.is_drop_ready_account(account)
+    def set_control_frame(self, control_frame):
+        """Установка ссылки на ControlFrame"""
+        self.control_frame = control_frame
+
+    def _load_levels_from_json(self):
+        levels_cache = {}
+        level_file = Path("level.json")
+        if level_file.exists():
+            try:
+                with open(level_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                levels_cache = data
+            except Exception as e:
+                print(f"⚠️ Ошибка level.json: {e}")
+        return levels_cache
+
+    def _save_levels_to_json(self):
+        try:
+            with open("level.json", "w", encoding="utf-8") as f:
+                json.dump(self.levels_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"⚠️ Сохранение level.json: {e}")
+
+    # 🆕 Загрузка отфармленных аккаунтов
+    def _load_farmed_accounts(self):
+        """Загружает список отфармленных аккаунтов из settings/accs_list.txt"""
+        if not self.farmed_file.exists():
+            return set()
+        
+        try:
+            with open(self.farmed_file, "r", encoding="utf-8") as f:
+                logins = [line.strip() for line in f.readlines() if line.strip()]
+            print(f"✅ Загружены отфармленные: {logins[:5]}{'...' if len(logins)>5 else ''}")
+            return set(logins)
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки farmed_accounts: {e}")
+            return set()
+
+    # 🆕 Сохранение отфармленных аккаунтов
+    def _save_farmed_accounts(self):
+        """Сохраняет список отфармленных аккаунтов в settings/accs_list.txt"""
+        try:
+            with open(self.farmed_file, "w", encoding="utf-8") as f:
+                for login in sorted(self.farmed_accounts):
+                    f.write(f"{login}\n")
+            print(f"💾 Сохранено {len(self.farmed_accounts)} отфармленных аккаунтов")
+        except Exception as e:
+            print(f"⚠️ Ошибка сохранения farmed_accounts: {e}")
+
+    def _create_switches(self):
+        for i, account in enumerate(self.accountsManager.accounts):
+            row_frame = customtkinter.CTkFrame(self.scrollable_content, fg_color="transparent")
+            row_frame.grid(row=i, column=0, pady=2, sticky="ew", padx=0)
+            row_frame.grid_columnconfigure(0, weight=1)
+
+            # Switch
+            sw = customtkinter.CTkSwitch(
+                row_frame,
+                text=f"{account.login}",
+                command=lambda acc=account: self._toggle_account(acc),
+                width=250,
+                height=28
+            )
+            sw.grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+            # Level + XP
+            login = account.login
+            if login in self.levels_cache and "level" in self.levels_cache[login]:
+                level = self.levels_cache[login]["level"]
+                xp = self.levels_cache[login]["xp"]
+                stats_text = f"[lvl: {level} | xp: {xp}]"
+                text_color = "#00ff88"
+            else:
+                stats_text = "[lvl:-- | xp:--]"
+                text_color = "#888"
+
+            stats_label = customtkinter.CTkLabel(
+                row_frame, 
+                text=stats_text, 
+                font=customtkinter.CTkFont(size=11, weight="bold"),
+                text_color=text_color, 
+                width=85,
+                height=28,
+                anchor="e"
+            )
+            stats_label.grid(row=0, column=1, sticky="e")
+
+            self.switches.append(sw)
+            self.level_labels.append((account, stats_label))
+            self.account_switches.append((account, sw))
+            account.setColorCallback(lambda color, acc=account, s=sw: self._handle_color_change(acc, color, s))
+
+    def _process_ui_queue(self):
+        try:
+            while True:
+                func = self._ui_queue.get_nowait()
+                func()
+        except queue.Empty:
+            pass
+
+        # повторяем каждые 50мс
+        self.after(50, self._process_ui_queue)
+
+
+    def _handle_color_change(self, account, color, switch):
+        # ⚠️ Тут НЕЛЬЗЯ трогать Tk вообще. Только кладём задачу в очередь.
+        def ui_update():
+            try:
+                if self.is_farmed_account(account) and color == "#DCE4EE":
+                    switch.configure(text_color="#ff9500")
+                    account._color = "#ff9500"
+                elif self.is_drop_ready_account(account) and color == "#DCE4EE":
+                    switch.configure(text_color="#a855f7")
+                    account._color = "#a855f7"
+                else:
+                    switch.configure(text_color=color)
+
+                self.update_label()
+            except Exception:
+                # если виджет уничтожен/окно закрыто — молча игнорируем
+                pass
+
+        self._ui_queue.put(ui_update)
+
+
+
+    def _mark_ui_ready(self):
+        self.ui_ready = True
+
+    # 🆕 Применение цветов отфармленных при запуске
+    def _apply_farmed_colors(self):
+        """Применяет сохраненные цвета: оранжевый/фиолетовый."""
+        for i, account in enumerate(self.accountsManager.accounts):
+            if account.login in self.farmed_accounts:
+                account.setColor("#ff9500")  # 🟠 Оранжевый для отфармленных
+                print(f"🟠 [{account.login}] Восстановлен цвет отфармленного")
+            elif self.is_drop_ready_account(account):
+                account.setColor("#a855f7")
+                print(f"🟣 [{account.login}] Восстановлен цвет Take drop")
+    def update_account_level(self, login, level, xp):
+        print(f"📊 [{login}]lvl: {level} xp: {xp}")
+        matched_account = None
+        for acc, stats_label in self.level_labels:
+            if acc.login == login:
+                matched_account = acc
+                stats_label.configure(text=f"[lvl: {level} | xp: {xp}]", text_color="#00ff88")
+                break
+
+        existing = self.levels_cache.get(login, self.levels_cache.get(login.lower(), {}))
+        current_data = existing if isinstance(existing, dict) else {}
+        current_data.update({"level": level, "xp": xp})
+
+        week_start_iso = self._get_weekly_window_start()
+        baseline_level = current_data.get("weekly_baseline_level")
+        baseline_start = current_data.get("weekly_baseline_start")
+        has_take_drop = (
+            baseline_start == week_start_iso
+            and isinstance(level, int)
+            and isinstance(baseline_level, int)
+            and level >= baseline_level + 1
+        )
+
+        if has_take_drop:
+            current_data["drop_ready_week_start"] = week_start_iso
+        self.levels_cache[login] = current_data
+        self._save_levels_to_json()
+        if has_take_drop and matched_account and login not in self.farmed_accounts:
+            matched_account.setColor("#a855f7")
+        self.update_label()
+
+    def _toggle_account(self, account):
+        if account in self.accountsManager.selected_accounts:
+            self.accountsManager.selected_accounts.remove(account)
+        else:
+            self.accountsManager.selected_accounts.append(account)
+        self.update_label()
+
+    def update_label(self):
+        self.label_text.configure(text=self._get_label_text())
+        for sw, account in zip(self.switches, self.accountsManager.accounts):
+            if account in self.accountsManager.selected_accounts:
+                sw.select()
+            else:
+                sw.deselect()
+
+    def _get_label_text(self):
+        return f"Accs: {len(self.accountsManager.accounts)} | Selected: {len(self.accountsManager.selected_accounts)} | Launched: {self.accountsManager.count_launched_accounts()}"
+
+    # 🆕 ОБНОВЛЕННЫЙ метод отметки отфармленных
+    def mark_farmed_accounts(self):
+        """🟠 Отмечает ВСЕ выделенные аккаунты как отфармленные (оранжевый)"""
+        print("🟠 Отмечаем отфармленные аккаунты...")
+        selected_accounts = self.accountsManager.selected_accounts.copy()
+        
+        for account in selected_accounts:
+            login = account.login
+            # Устанавливаем оранжевый цвет
+            account.setColor("#ff9500")  # 🟠 Оранжевый
+            # Добавляем в отфармленные
+            self.farmed_accounts.add(login)
+            self.set_drop_ready(login, value=False)
+            print(f"🟠 [{login}] Отмечен как отфармленный")
+        
+        # ✅ Сохраняем в файл
+        self._save_farmed_accounts()
+        
+        # ✅ Очищаем выделение
+        self.accountsManager.selected_accounts.clear()
+        self.update_label()
+        print(f"✅ Отфармлено {len(selected_accounts)} аккаунтов")
+
+    def is_farmed_account(self, account):
+        """Проверяет, является ли аккаунт отфармленным"""
+        return account.login in self.farmed_accounts
+
+    def select_first_non_farmed(self, n=4):
+        """Выбирает первые N НЕ отфармленных аккаунтов"""
+        available_accounts = [acc for acc in self.accountsManager.accounts 
+                            if not self.is_reserved_from_rotation(acc)]
+        count = min(n, len(available_accounts))
+        
+        self.accountsManager.selected_accounts.clear()
+        for acc in available_accounts[:count]:
+            self.accountsManager.selected_accounts.append(acc)
+        
+        print(f"✅ Выбрано {count} НЕ отфармленных аккаунтов")
+        self.update_label()
+
+    # 🆕 Метод для сброса отфармленных (если понадобится)
+    def clear_farmed_accounts(self):
+        """🔄 Сбрасывает все отфармленные аккаунты"""
+        self.farmed_accounts.clear()
+        self._save_farmed_accounts()
+        self.reset_all_colors()
+        print("🔄 Все отфармленные аккаунты сброшены!")
+
+    def set_green_for_launched_cs2(self, launched_pids):
+        """🟢 Зелёный ТОЛЬКО для НИКОВ - lvl/xp НЕ ТРОГАЕМ!"""
+        print(f"🟢 Обновляем НИКИ для PID: {launched_pids}")
+        
+        processed_accounts = set()
+        
+        for i, (account, stats_label) in enumerate(self.level_labels):
+            login = account.login
+            
+            if login in processed_accounts:
+                continue
+            
+            cs2_pid = self._get_account_cs2_pid(login)
+            
+            if cs2_pid and cs2_pid in launched_pids:
+                # ✅ 🟢 ЗЕЛЁНЫЙ ТОЛЬКО НИК (switch)!
+                account.setColor("green")
+                print(f"✅ 🟢 НИК: {login} (PID {cs2_pid})")
+            else:
+                # ✅ ⚪ Белый ТОЛЬКО НИК (switch)! (кроме оранжевых отфармленных)
+                if login not in self.farmed_accounts:
+                    if self.is_drop_ready_account(account):
+                        account.setColor("#a855f7")
+                    else:
+                        account.setColor("#DCE4EE")
+                else:
+                    account.setColor("#ff9500")
+                # 🟠 Оранжевые остаются оранжевыми
+                
+            processed_accounts.add(login)
+        
+        self.update_label()
+
+    def _get_account_cs2_pid(self, login):
+        """Находит CS2Pid аккаунта из runtime.json"""
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            runtime_path = os.path.join(project_root, "runtime.json")
+            
+            if os.path.exists(runtime_path):
+                with open(runtime_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for item in data:
+                        if item.get('login') == login:
+                            return int(item.get('CS2Pid', 0))
+        except Exception as e:
+            print(f"⚠️ Ошибка поиска CS2Pid {login}: {e}")
+        return None
+
+    def reset_all_colors(self):
+        def ui_update():
+            print("🔄 Сброс НИКОВ в белый...")
+            for i, sw in enumerate(self.switches):
+                login = self.accountsManager.accounts[i].login
+                if login not in self.farmed_accounts:
+                    if self.is_drop_ready_login(login):
+                        sw.configure(text_color="#a855f7")
+                    else:
+                        sw.configure(text_color="#DCE4EE")
+            print("✅ НИКИ сброшены!")
+
+        self.after(0, ui_update)
+
+
+# ===== Inlined from ui/accounts_tab.py =====
+import os
+import re
+import shutil
+import threading
+import customtkinter
+import time
+import keyboard
+
+from Helpers.LoginExecutor import SteamLoginSession
+from Managers.AccountsManager import AccountManager
+from Managers.LogManager import LogManager
+from Managers.SettingsManager import SettingsManager
+
+
+class AccountsControl(customtkinter.CTkTabview):
+    def __init__(self, parent, update_label, accounts_list):
+        super().__init__(parent, width=250)
+        self._active_stat_threads = 0
+        self._stat_lock = threading.Lock()
+        self._start_sequence_lock = threading.Lock()
+        self._start_sequence_active = False
+        self._ctrlq_hotkey_handle = None
+        self._settingsManager = SettingsManager()
+        self._logManager = LogManager()
+        self.accountsManager = AccountManager()
+        self.update_label = update_label
+        self.accounts_list = accounts_list
+        self.stat_buttons = []
+        self.grid(row=1, column=2, padx=(20, 0), pady=(0, 0), sticky="nsew")
+
+        # Вкладки
+        self.add("Accounts Control")
+        self.tab("Accounts Control").grid_columnconfigure(0, weight=1)
+
+        self.add("Account Stats")
+        self.tab("Account Stats").grid_columnconfigure(0, weight=1)
+
+        self.create_control_buttons()
+        self.create_stat_buttons()
+        
+        self.accounts_list.set_control_frame(self)
+
+    # ----------------- Вкладка Accounts Control -----------------
+    def create_control_buttons(self):
+        buttons = [
+            ("Start selected accounts", "darkgreen", self.start_selected),
+            ("Kill selected accounts", "red", self.kill_selected),
+            ("Select first 4 accounts", None, self.select_first_4),
+            ("Select all accounts", None, self.select_unselect_all_accounts),
+            ("Select dedicated farmed", "orange", self.mark_farmed),  # Toggle кнопка
+        ]
+        for i, (text, color, cmd) in enumerate(buttons):
+            b = customtkinter.CTkButton(self.tab("Accounts Control"), text=text, fg_color=color, command=cmd)
+            b.grid(row=i, column=0, padx=20, pady=10)
+
+    def mark_farmed(self):
+        """🟠 Toggle: отмечает/снимает отфармленные аккаунты"""
+        if self.accounts_list:
+            selected_accounts = self.accountsManager.selected_accounts.copy()
+            if not selected_accounts:
+                print("⚠️ Нет выделенных аккаунтов!")
+                return
+            
+
+
+            for account in selected_accounts:
+                login = account.login
+                if self.accounts_list.is_farmed_account(account):
+                    account.setColor("#DCE4EE")
+                    self.accounts_list.farmed_accounts.discard(login)
+                    self.accounts_list.set_drop_ready(login, value=False)
+                    print(f"⚪ [{login}] Оранжевый -> белый")
+                elif self.accounts_list.is_drop_ready_account(account):
+                    account.setColor("#ff9500")
+                    self.accounts_list.farmed_accounts.add(login)
+                    self.accounts_list.set_drop_ready(login, value=False)
+                    print(f"🟠 [{login}] Фиолетовый -> оранжевый")
+                else:
+                    account.setColor("#ff9500")
+                    self.accounts_list.farmed_accounts.add(login)
+                    print(f"🟠 [{login}] Белый -> оранжевый")
+
+            self.accounts_list._save_farmed_accounts()
+            self.accountsManager.selected_accounts.clear()
+            self.update_label()
+        else:
+            print("⚠️ Нет ссылки на accounts_list")
+
+    def _unmark_farmed_accounts(self, accounts):
+        """🔄 Снимает отметку отфармленных аккаунтов"""
+        print("🔄 Снимаем отметку отфармленных аккаунтов...")
+        unmarked_count = 0
+        
+        for account in accounts:
+            login = account.login
+            if self.accounts_list.is_farmed_account(account):
+                # 🟠 → ⚪ Оранжвый → белый
+                account.setColor("#DCE4EE")
+                # Удаляем из списка отфармленных
+                self.accounts_list.farmed_accounts.discard(login)
+                self.accounts_list._save_farmed_accounts()
+                print(f" [{login}] Снято отфармлено (оранжевый → белый)")
+                unmarked_count += 1
+            else:
+                print(f"⚪ [{login}] Уже не отфармленный")
+        
+        print(f" Снято отфармлено с {unmarked_count} аккаунтов")
+        
+        # Очищаем выделение
+        self.accountsManager.selected_accounts.clear()
+        self.update_label()
+
+    def create_stat_buttons(self):
+        buttons = [
+            ("Get level", None, self.try_get_level),
+            ("Get wingman Rank", None, self.try_get_wingmanRank),
+            ("Get MM Ranks", None, self.try_get_mapStats),
+            ("Get premier Rank", None, self.try_get_premierRank),
+            ("Get all in html", None, self.save_stats_to_html),
+        ]
+        for i, (text, color, cmd) in enumerate(buttons):
+            b = customtkinter.CTkButton(self.tab("Account Stats"), text=text, fg_color=color,
+                                        command=lambda c=cmd: self._run_stat_with_lock(c))
+            b.grid(row=i, column=0, padx=20, pady=10)
+            self.stat_buttons.append(b)
+
+    def _disable_stat_buttons(self):
+        for b in self.stat_buttons:
+            b.configure(state="disabled")
+
+    def _enable_stat_buttons(self):
+        for b in self.stat_buttons:
+            b.configure(state="normal")
+
+    def _run_stat_with_lock(self, func):
+        def wrapper():
+            with self._stat_lock:
+                self._active_stat_threads += 1
+                if self._active_stat_threads == 1:
+                    self._disable_stat_buttons()
+            try:
+                func()
+            finally:
+                with self._stat_lock:
+                    self._active_stat_threads -= 1
+                    if self._active_stat_threads == 0:
+                        self._enable_stat_buttons()
+
+        self._run_in_thread(wrapper)
+
+    def start_selected(self): 
+        with self._start_sequence_lock:
+            if self._start_sequence_active:
+                self._logManager.add_log("⚠️ Процесс запуска уже выполняется. Дождитесь завершения")
+                return
+            self._start_sequence_active = True
+
+        steam_path = self._settingsManager.get(
+            "SteamPath", r"C:\Program Files (x86)\Steam\steam.exe"
+        )
+        cs2_path = self._settingsManager.get(
+            "CS2Path", r"C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
+        )
+        cs2_exe_path = os.path.join(cs2_path, r"game\bin\win64\cs2.exe")
+
+        if not os.path.isfile(steam_path) or not steam_path.lower().endswith(".exe"):
+            self._logManager.add_log("Steam path incorrect")
+            self._finish_start_sequence()
+            return
+
+        if not os.path.isfile(cs2_exe_path):
+            self._logManager.add_log("CS2 path incorrect")
+            self._finish_start_sequence()
+            return
+
+        if not self._sync_required_cfg_files_to_cs2(cs2_path):
+            self._finish_start_sequence()
+            return
+
+        accounts_to_start = self.accountsManager.selected_accounts.copy()
+        if not accounts_to_start:
+            self._logManager.add_log("No accounts selected")
+            self._finish_start_sequence()
+            return
+
+        self.auto_cancelled = False
+        self.auto_cancelled_by_user = False
+
+        self.accountsManager.begin_start_selected_batch(len(accounts_to_start))
+        for acc in accounts_to_start:
+            self.accountsManager.add_to_start_queue(acc)
+            print("Starting:", acc.login)
+
+        self.accountsManager.selected_accounts.clear()
+        self.update_label()
+
+        threading.Thread(target=lambda: self._auto_get_level(accounts_to_start), daemon=True).start()
+
+        self._register_ctrlq_hotkey()
+
+        def check_cancellation_loop():
+            timeout = 120
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if self.auto_cancelled:
+                    self._logManager.add_log("Start game canceled")
+                    break
+                time.sleep(0.5)
+
+            self._unregister_ctrlq_hotkey()
+            self._finish_start_sequence()
+
+        threading.Thread(target=check_cancellation_loop, daemon=True).start()
+
+        if self.auto_cancelled:
+            self._logManager.add_log("Start game canceled")
+            self._finish_start_sequence()
+            return
+
+        try:
+            app = self.winfo_toplevel()
+            if hasattr(app, "control_frame"):
+                def on_move_complete():
+                    if self.auto_cancelled:
+                        self._logManager.add_log("🛑 Lobbies отменены")
+                        self._finish_start_sequence()
+                        return
+
+                    auto_match_enabled = bool(self._settingsManager.get("AutoMatchInStartEnabled", True))
+                    if not auto_match_enabled:
+                        self._logManager.add_log("ℹ️ Auto match in start: OFF")
+                        self._finish_start_sequence()
+                        return
+
+                    def schedule_lobbies():
+                        try:
+                            current_app = self.winfo_toplevel()
+                            if hasattr(current_app, "main_menu"):
+                                current_app.main_menu.make_lobbies_and_search_game()
+                            else:
+                                self._logManager.add_log("❌ Main Menu not found: cannot trigger Make lobbies & Search game")
+                        except Exception as e:
+                            self._logManager.add_log(f"❌ Lobbies error: {e}")
+                        finally:
+                            self._finish_start_sequence()
+
+                    def delay_and_schedule():
+                        delay_seconds = 10
+                        step = 0.5
+                        waited = 0.0
+                        while waited < delay_seconds:
+                            if self.auto_cancelled:
+                                self._logManager.add_log("🛑 Lobbies/Search отменены")
+                                self._finish_start_sequence()
+                                return
+                            time.sleep(step)
+                            waited += step
+                        self.after(0, schedule_lobbies)
+
+                    threading.Thread(target=delay_and_schedule, daemon=True).start()
+
+                if not self.auto_cancelled:
+                    app.control_frame.auto_move_after_4_cs2(
+                        delay=25,
+                        callback=on_move_complete,
+                        cancel_check=lambda: self.auto_cancelled
+                    )
+                else:
+                    self._logManager.add_log("Start game canceled")
+                    self._finish_start_sequence()
+            else:
+                self._logManager.add_log("⚠️ control_frame not found in App")
+                self._finish_start_sequence()
+        except Exception as e:
+            self._logManager.add_log(f"❌ Auto sequence error: {e}")
+            self._finish_start_sequence()
+
+    def _finish_start_sequence(self):
+        with self._start_sequence_lock:
+            self._start_sequence_active = False
+
+    def _global_ctrlq_callback(self):
+        """🔥 Глобальный Ctrl+Q обработчик"""
+        self.auto_cancelled = True
+        self.auto_cancelled_by_user = True
+
+    def _register_ctrlq_hotkey(self):
+        self._unregister_ctrlq_hotkey()
+        self._ctrlq_hotkey_handle = keyboard.add_hotkey('ctrl+q', self._global_ctrlq_callback)
+
+    def _unregister_ctrlq_hotkey(self):
+        if self._ctrlq_hotkey_handle is None:
+            return
+        try:
+            keyboard.remove_hotkey(self._ctrlq_hotkey_handle)
+        except KeyError:
+            pass
+        finally:
+            self._ctrlq_hotkey_handle = None
+
+    def _auto_get_level(self, accounts):
+        time.sleep(2)
+        self._logManager.add_log("🔄 Авто Get Level для запущенных аккаунтов...")
+        self.try_get_level_for_accounts(accounts)
+    def _refresh_modern_levels_ui(self):
+        """Обновляет уровни в новом UI (ui/app.py), если он доступен."""
+        try:
+            app = self.winfo_toplevel()
+            if hasattr(app, "_refresh_level_labels"):
+                app.after(0, app._refresh_level_labels)
+        except Exception:
+            pass
+    def try_get_level_for_accounts(self, accounts):
+        def worker():
+            for acc in accounts:
+                try:
+                    steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
+                    html = self._fetch_html(steam, url_suffix="gcpd/730")
+                    if not html:
+                        continue
+                    rank_match = re.search(r'CS:GO Profile Rank:\s*([^\n<]+)', html)
+                    xp_match = re.search(r'Experience points earned towards next rank:\s*([^\n<]+)', html)
+                    if rank_match and xp_match:
+                        rank = rank_match.group(1).strip().replace(',', '')
+                        exp = xp_match.group(1).strip().replace(',', '').split()[0]
+                        
+                        try:
+                            level = int(rank)
+                            xp = int(exp)
+                            self._logManager.add_log(f"[{acc.login}]  lvl: {level} | xp: {xp}")
+                            if self.accounts_list:
+                                self.accounts_list.update_account_level(acc.login, level, xp)
+                            self._refresh_modern_levels_ui()
+                        except ValueError:
+                            self._logManager.add_log(f"[{acc.login}] ❌ Parse error")
+                except Exception as e:
+                    self._logManager.add_log(f"[{acc.login}] ❌ Auto level error: {e}")
+        
+        threading.Thread(target=worker, daemon=True).start()
+
+    def try_get_level(self):
+        def worker():
+            for acc in self.accountsManager.selected_accounts:
+                try:
+                    steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
+                    html = self._fetch_html(steam, url_suffix="gcpd/730")
+                    if not html:
+                        self._logManager.add_log(f"[{acc.login}] ❌ No HTML")
+                        continue
+
+                    print(f"⏳ [{acc.login}] Wait for JS...")
+                    time.sleep(1)
+
+                    level, xp = 0, 0
+                    rank_match = re.search(r'CS:GO Profile Rank:\s*([\d,]+)', html, re.IGNORECASE)
+                    if rank_match:
+                        level = int(rank_match.group(1).replace(',', ''))
+                        xp_match = re.search(r'Experience points earned towards next rank:\s*([\d,]+)', html, re.IGNORECASE)
+                        xp = int(xp_match.group(1).replace(',', '')) if xp_match else 0
+                    else:
+                        if re.search(r'"profile_rank"[:\s]*(\d+)', html):
+                            rank_match = re.search(r'"profile_rank"[:\s]*(\d+)', html)
+                            level = int(rank_match.group(1)) if rank_match else 0
+
+                    if level > 0:
+                        self._logManager.add_log(f"[{acc.login}] lvl: {level} | xp: {xp}")
+                        acc.update_level_xp(level, xp)
+                        self.accounts_list.update_account_level(acc.login, level, xp)
+                        self._refresh_modern_levels_ui()
+                    else:
+                        with open(f"debug_{acc.login}.html", "w", encoding="utf-8") as f:
+                            f.write(html)
+                        self._logManager.add_log(f"[{acc.login}] ❌ No level (debug_{acc.login}.html)")
+
+                except Exception as e:
+                    self._logManager.add_log(f"[{acc.login}] ❌ Error: {e}")
+
+        self._run_stat_with_lock(worker)
+
+    def kill_selected(self):
+        print("💀 УБИВАЮ ВЫБРАННЫЕ аккаунты!")
+        
+        killed = 0
+        for acc in self.accountsManager.selected_accounts[:]:
+            try:
+                if hasattr(acc, 'steamProcess') and acc.steamProcess:
+                    try:
+                        acc.steamProcess.kill()
+                        print(f"💀 Steam [{acc.login}]: {acc.steamProcess.pid}")
+                        killed += 1
+                    except:
+                        pass
+                    acc.steamProcess = None
+                    
+                if hasattr(acc, 'CS2Process') and acc.CS2Process:
+                    try:
+                        acc.CS2Process.kill()
+                        print(f"💀 CS2 [{acc.login}]: {acc.CS2Process.pid}")
+                        killed += 1
+                    except:
+                        pass
+                    acc.CS2Process = None
+                
+                if self.accounts_list and self.accounts_list.is_farmed_account(acc):
+                    acc.setColor("#ff9500")
+                    print(f" [{acc.login}] Сброс - оранжевый цвет")
+                elif self.accounts_list and self.accounts_list.is_drop_ready_account(acc):
+                    acc.setColor("#a855f7")
+                    print(f" [{acc.login}] Сброс - фиолетовый цвет")
+                else:
+                    acc.setColor("#DCE4EE")
+                    print(f" [{acc.login}] Сброс - белый цвет")
+                
+            except Exception as e:
+                print(f"⚠️ [{acc.login}] Ошибка: {e}")
+        
+        self.accountsManager.selected_accounts.clear()
+        self.update_label()
+        print(f" УБИТО {killed} процессов выбранных аккаунтов!")
+
+    def select_first_4(self):
+        if len(self.accountsManager.selected_accounts) < 4:
+            if self.accounts_list:
+                self.accounts_list.select_first_non_farmed(4)
+            else:
+                self._select_first_n(4)
+        else:
+            self.accountsManager.selected_accounts = []
+            self.update_label()
+
+    def select_unselect_all_accounts(self):
+        all_accounts = self.accountsManager.accounts
+        if not all_accounts:
+            return
+
+        if len(self.accountsManager.selected_accounts) == len(all_accounts):
+            self.accountsManager.selected_accounts.clear()
+        else:
+            self.accountsManager.selected_accounts = list(all_accounts)
+
+        self.update_label()
+    def _select_first_n(self, n):
+        for acc in self.accountsManager.accounts[:n]:
+            if acc not in self.accountsManager.selected_accounts:
+                self.accountsManager.selected_accounts.append(acc)
+        self.update_label()
+
+    def _resolve_cs2_cfg_folder(self, cs2_path):
+        candidates = [
+            os.path.join(cs2_path, "game", "csgo", "cfg"),
+            os.path.join(cs2_path, "cfg"),
+        ]
+        for folder in candidates:
+            if os.path.isdir(folder):
+                return folder
+        return None
+
+    def _sync_required_cfg_files_to_cs2(self, cs2_path):
+        cfg_folder = self._resolve_cs2_cfg_folder(cs2_path)
+        if not cfg_folder:
+            self._logManager.add_log("CS2 cfg folder not found")
+            return False
+
+        files_to_sync = [
+            "cs2_machine_convars.vcfg",
+            "cs2_video.txt",
+            "cs2_video.txt.bak",
+            "gamestate_integration_fsn.cfg",
+            "fsn.cfg",
+        ]
+
+        for file_name in files_to_sync:
+            source = os.path.join("settings", file_name)
+            target = os.path.join(cfg_folder, file_name)
+
+            if not os.path.isfile(source):
+                self._logManager.add_log(f"Missing source file: {source}")
+                return False
+
+            try:
+                shutil.copy2(source, target)
+            except Exception as e:
+                self._logManager.add_log(f"Failed to copy {file_name}: {e}")
+                return False
+
+        return True
+        
+    # ----------------- Helper Methods -----------------
+    def _fetch_html(self, steam, url_suffix="gcpd/730/?tab=matchmaking"):
+        try:
+            steam.login()
+        except Exception as e:
+            self._logManager.add_log(f"[{steam.login}] ❌ Failed to login: {e}")
+            return None
+        try:
+            resp = steam.session.get(f'https://steamcommunity.com/profiles/{steam.steamid}/{url_suffix}', timeout=10)
+        except Exception as e:
+            self._logManager.add_log(f"[{steam.login}] ❌ Failed to fetch page: {e}")
+            return None
+        if resp.status_code != 200:
+            self._logManager.add_log(f"[{steam.login}] ❌ HTTP {resp.status_code}")
+            return None
+        return resp.text
+
+    def _run_in_thread(self, func):
+        thread = threading.Thread(target=func, daemon=True)
+        thread.start()
+
+    # ----------------- Stats Methods -----------------
+    def try_get_premierRank(self):
+        def worker():
+            for acc in self.accountsManager.selected_accounts:
+                steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
+                html = self._fetch_html(steam)
+                if not html:
+                    continue
+                match = re.search(
+                    r'<td>Premier</td><td>(\d+)</td><td>(\d+)</td><td>(\d+)</td><td>([^<]*)</td>',
+                    html
+                )
+                if match:
+                    wins, ties, losses = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                    skill = match.group(4).strip()
+                    skill = int(skill) if skill.isdigit() else -1
+                    self._logManager.add_log(f"[{acc.login}] Premier: W:{wins} T:{ties} L:{losses} R:{skill}")
+                else:
+                    self._logManager.add_log(f"[{acc.login}] ⚠ Premier stats not found")
+        self._run_stat_with_lock(worker)
+
+    def try_get_wingmanRank(self):
+        def worker():
+            for acc in self.accountsManager.selected_accounts:
+                steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
+                html = self._fetch_html(steam)
+                if not html:
+                    continue
+                match = re.search(
+                    r'<td>Wingman</td><td>(\d+)</td><td>(\d+)</td><td>(\d+)</td><td>([^<]*)</td>',
+                    html
+                )
+                if match:
+                    wins, ties, losses = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                    skill = match.group(4).strip()
+                    skill = int(skill) if skill.isdigit() else -1
+                    self._logManager.add_log(f"[{acc.login}] Wingman: W:{wins} T:{ties} L:{losses} R:{skill}")
+                else:
+                    self._logManager.add_log(f"[{acc.login}] ⚠ Wingman stats not found")
+        self._run_stat_with_lock(worker)
+
+    def try_get_mapStats(self):
+        def worker():
+            for acc in self.accountsManager.selected_accounts:
+                steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
+                html = self._fetch_html(steam)
+                if not html:
+                    continue
+                table_match = re.search(
+                    r'<table class="generic_kv_table"><tr>\s*<th>Matchmaking Mode</th>\s*<th>Map</th>.*?</table>',
+                    html, re.DOTALL
+                )
+                if not table_match:
+                    self._logManager.add_log(f"[{acc.login}] ⚠ No map stats table found")
+                    continue
+                table_html = table_match.group(0)
+                rows = re.findall(
+                    r'<tr>\s*<td>([^<]+)</td><td>([^<]+)</td><td>(\d+)</td><td>(\d+)</td><td>(\d+)</td><td>([^<]*)</td>',
+                    table_html
+                )
+                if rows:
+                    for mode, map_name, wins, ties, losses, skill in rows:
+                        wins, ties, losses = int(wins), int(ties), int(losses)
+                        skill = skill.strip()
+                        skill = int(skill) if skill.isdigit() else -1
+                        self._logManager.add_log(
+                            f"[{acc.login}] Map '{map_name}': W:{wins} T:{ties} L:{losses} R:{skill}"
+                        )
+        self._run_stat_with_lock(worker)
+
+    def save_stats_to_html(self, filename="cs2_stats.html"):
+        def worker():
+            html_parts = [
+                "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>CS2 Stats</title>",
+                "<style>body { background-color: #121212; color: #eee; font-family: 'Segoe UI', Tahoma, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }",
+                "h1 { color: #00bfff; margin-bottom: 30px; }.account-card { background: #1e1e1e; border-radius: 8px; padding: 15px; margin-bottom: 20px; width: 100%; max-width: 600px; box-shadow: 0 3px 8px rgba(0,0,0,0.5); }",
+                ".account-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }.account-title { font-size: 1.3em; color: #ffcc00; }.account-level { font-size: 0.95em; color: #00ff90; }",
+                "table { border-collapse: collapse; width: 100%; margin-bottom: 10px; font-size: 13px; } th, td { border: 1px solid #333; padding: 5px; text-align: center; } th { background-color: #222; color: #fff; }",
+                "tr:nth-child(even) { background-color: #2a2a2a; } tr:hover { background-color: #333; }.wins { color: #00ff00; font-weight: bold; }.ties { color: #ffff66; font-weight: bold; }.losses { color: #ff5555; font-weight: bold; }",
+                ".skill { color: #00bfff; font-weight: bold; }.missing { color: #ff5555; font-style: italic; font-size: 12px; }</style></head><body><h1>CS2 Account Stats</h1>"
+            ]
+            i = 1
+            accounts = self.accountsManager.selected_accounts
+            for acc in accounts:
+                self._logManager.add_log(f"Collecting stats ({i}/{len(accounts)})")
+                steam = SteamLoginSession(acc.login, acc.password, acc.shared_secret)
+                level_html = self._fetch_html(steam, "gcpd/730")
+                rank_match = re.search(r'CS:GO Profile Rank:\s*([^\n<]+)', level_html) if level_html else None
+                xp_match = re.search(r'Experience points earned towards next rank:\s*([^\n<]+)', level_html) if level_html else None
+                level = rank_match.group(1).strip() if rank_match else "N/A"
+                xp = xp_match.group(1).strip() if xp_match else "N/A"
+                stats_html = self._fetch_html(steam)
+                html_parts.extend([
+                    "<div class='account-card'>",
+                    f"<div class='account-header'><div class='account-title'>{acc.login}</div><div class='account-level'>Level: {level} | XP: {xp}</div></div>"
+                ])
+                # Premier, Wingman, Map Stats (сокращено для компактности)
+                html_parts.append("</div>")
+                i += 1
+            html_parts.extend(["</body></html>"])
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write("\n".join(html_parts))
+            self._logManager.add_log(f" Stats saved to {filename}")
+        self._run_stat_with_lock(worker)
+
+    def update_label(self):
+        if hasattr(self.parent, 'update_label'):
+            self.parent.update_label()
+
+
+# ===== Inlined from ui/config_tab.py =====
+import os
+import shutil
+import subprocess
+import threading
+
+import customtkinter
+
+from Managers.AccountsManager import AccountManager
+from Managers.LogManager import LogManager
+from Managers.SettingsManager import SettingsManager
+
+
+class ConfigTab(customtkinter.CTkTabview):
+    def __init__(self, parent):
+        super().__init__(parent, width=250)
+        self._settingsManager = SettingsManager()
+        self._logManager = LogManager()
+        self.accountsManager = AccountManager()
+
+        self.grid(row=0, column=3, padx=(20, 20), pady=(0, 0), sticky="nsew")
+        self.add("Config")
+        self.tab("Config").grid_columnconfigure(0, weight=1)
+
+        # --- Buttons for path selection ---
+        b1 = customtkinter.CTkButton(
+            self.tab("Config"),
+            text="Select Steam path",
+            command=lambda: self.set_path("SteamPath", "Steam", "C:/Program Files (x86)/Steam/steam.exe"),
+        )
+        b2 = customtkinter.CTkButton(
+            self.tab("Config"),
+            text="Select CS2 path",
+            command=lambda: self.set_path(
+                "CS2Path",
+                "CS2",
+                "C:/Program Files (x86)/Steam/steamapps/common/Counter-Strike Global Offensive",
+            ),
+        )
+        b1.grid(row=0, column=0, padx=20, pady=10)
+        b2.grid(row=1, column=0, padx=20, pady=10)
+
+        # --- Switches ---
+        self.bg_switch = customtkinter.CTkSwitch(
+            self.tab("Config"),
+            text="Remove background",
+            command=lambda: self._settingsManager.set("RemoveBackground", self.bg_switch.get()),
+        )
+        self.bg_switch.grid(row=2, column=0, padx=10, pady=5)
+
+        self.overlay_switch = customtkinter.CTkSwitch(
+            self.tab("Config"),
+            text="Disable Steam Overlay",
+            command=lambda: self._settingsManager.set("DisableOverlay", self.overlay_switch.get()),
+        )
+        self.overlay_switch.grid(row=3, column=0, padx=10, pady=5)
+
+        self.send_trade_button = customtkinter.CTkButton(
+            self.tab("Config"),
+            text="Send trade",
+            fg_color="#ff1a1a",
+            command=self.send_trade_selected,
+        )
+        self.send_trade_button.grid(row=4, column=0, padx=20, pady=(10, 5))
+
+        self.settings_looter_button = customtkinter.CTkButton(
+            self.tab("Config"),
+            text="Settings looter",
+            fg_color="#1b5e20",
+            command=self.open_looter_settings,
+        )
+        self.settings_looter_button.grid(row=5, column=0, padx=20, pady=(5, 10))
+
+        # --- Load saved values ---
+        self.load_settings()
+
+    def set_path(self, key, name, placeholder):
+        """Opens a path input window and saves result in settingsManager."""
+        value = self.open_path_window(name, placeholder)
+        if value:
+            self._settingsManager.set(key, value)
+
+    def open_path_window(self, name, placeholder):
+        """Opens a separate window for entering a path and returns the result."""
+        result = {"value": None}
+
+        win = customtkinter.CTkToplevel(self)
+        win.title(f"Select {name} path")
+        win.geometry("500x150")
+        win.grab_set()
+
+        label = customtkinter.CTkLabel(win, text=f"Enter {name} path:")
+        label.pack(pady=(20, 5))
+
+        entry = customtkinter.CTkEntry(win, placeholder_text=f"Example: {placeholder}", width=400)
+        entry.pack(pady=5)
+
+        def save_and_close():
+            result["value"] = entry.get()
+            win.destroy()
+
+        btn = customtkinter.CTkButton(win, text="OK", command=save_and_close)
+        btn.pack(pady=10)
+
+        win.wait_window()
+        return result["value"]
+
+    def load_settings(self):
+        """Load saved values from settingsManager and apply them."""
+        bg_value = self._settingsManager.get("RemoveBackground", False)
+        if bg_value is not None:
+            self.bg_switch.select() if bg_value else self.bg_switch.deselect()
+
+        overlay_value = self._settingsManager.get("DisableOverlay", False)
+        if overlay_value is not None:
+            self.overlay_switch.select() if overlay_value else self.overlay_switch.deselect()
+
+        steam_path = self._settingsManager.get("SteamPath", "C:/Program Files (x86)/Steam/steam.exe")
+        if steam_path:
+            print(f"Loaded SteamPath: {steam_path}")
+
+        cs2_path = self._settingsManager.get(
+            "CS2Path", "C:/Program Files (x86)/Steam/steamapps/common/Counter-Strike Global Offensive"
+        )
+        if cs2_path:
+            print(f"Loaded CS2Path: {cs2_path}")
+
+    def _get_looter_script_path(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(project_root, "looter_core.js")
+
+    def open_looter_settings(self):
+        current_inventory = self._settingsManager.get("LooterInventory", "730/2")
+
+        dialog = customtkinter.CTkInputDialog(
+            text=(
+                "Введите ссылку обмена Steam (trade offer link).\n"
+                "Она будет использована кнопкой Send trade."
+            ),
+            title="Settings looter",
+        )
+        new_trade_link = dialog.get_input()
+
+        if new_trade_link is None:
+            self._logManager.add_log("⚠️ Настройки лутера не изменены")
+            return
+
+        new_trade_link = new_trade_link.strip()
+        if not new_trade_link:
+            self._logManager.add_log("❌ Пустая трейд ссылка. Настройки не сохранены")
+            return
+
+        inv_dialog = customtkinter.CTkInputDialog(
+            text=(
+                "Инвентари для отправки (например: 730/2 440/2 753/6).\n"
+                "Разделители: пробел, запятая или ;\n"
+                f"Текущее значение: {current_inventory}"
+            ),
+            title="Settings looter",
+        )
+        new_inventory = inv_dialog.get_input()
+
+        if new_inventory is None:
+            new_inventory = current_inventory
+        else:
+            new_inventory = new_inventory.strip() or "730/2"
+
+        new_inventory = self._normalize_inventory_string(new_inventory)
+        if not new_inventory:
+            self._logManager.add_log("❌ Инвентари указаны некорректно. Использую значение по умолчанию 730/2")
+            new_inventory = "730/2"
+
+        self._settingsManager.set("LooterTradeLink", new_trade_link)
+        self._settingsManager.set("LooterInventory", new_inventory)
+        self._logManager.add_log("✅ Settings looter сохранены")
+
+    def send_trade_selected(self, on_trade_sent=None):
+        selected_accounts = self.accountsManager.selected_accounts.copy()
+        if not selected_accounts:
+            self._logManager.add_log("⚠️ Выберите аккаунты для отправки трейда")
+            return
+
+        trade_link = (self._settingsManager.get("LooterTradeLink", "") or "").strip()
+        if not trade_link:
+            self._logManager.add_log("❌ Сначала заполните trade link в Settings looter")
+            return
+
+        script_path = self._get_looter_script_path()
+        if not os.path.isfile(script_path):
+            self._logManager.add_log(f"❌ Файл looter_core.js не найден: {script_path}")
+            return
+
+        inventory_string = (self._settingsManager.get("LooterInventory", "730/2") or "730/2").strip() or "730/2"
+        inventory_string = self._normalize_inventory_string(inventory_string)
+        if not inventory_string:
+            self._logManager.add_log("❌ В настройках looter нет валидных inventory pair")
+            return
+
+        self._logManager.add_log(f"🚚 Запускаю Send trade для {len(selected_accounts)} аккаунтов")
+        threading.Thread(
+            target=self._send_trade_worker,
+            args=(selected_accounts, trade_link, inventory_string, script_path, on_trade_sent),
+            daemon=True,
+        ).start()
+
+    def _extract_looter_error(self, stdout, stderr):
+        lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+        for line in reversed(lines):
+            if "HandleError" in line:
+                return line
+
+        err_lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+        if err_lines:
+            return err_lines[-1]
+        return ""
+
+    def _is_authorization_error(self, error_line):
+        lowered = (error_line or "").lower()
+        return (
+            "steam login error" in lowered
+            or "ratelimitexceeded" in lowered
+            or "accountlogindeniedthrottle" in lowered
+            or "toomanylogonfailures" in lowered
+            or "invalidpassword" in lowered
+            or "twofactor" in lowered
+            or "invalidauthcode" in lowered
+        )
+
+    def _send_trade_worker(self, selected_accounts, trade_link, inventory_string, script_path, on_trade_sent=None):
+        script_dir = os.path.dirname(script_path)
+
+        if not self._ensure_looter_dependencies(script_dir):
+            return
+
+        for acc in selected_accounts:
+            if not acc.shared_secret:
+                self._logManager.add_log(f"⚠️ [{acc.login}] Нет shared_secret (mafile), пропускаю")
+                continue
+
+            if not getattr(acc, "identity_secret", None):
+                self._logManager.add_log(f"⚠️ [{acc.login}] Нет identity_secret (mafile), пропускаю")
+                continue
+
+            cmd = [
+                "node",
+                script_path,
+                acc.login,
+                acc.password,
+                acc.shared_secret,
+                acc.identity_secret,
+                trade_link,
+                inventory_string,
+            ]
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                    cwd=script_dir,
+                    env={**os.environ, "NODE_NO_WARNINGS": "1"},
+                )
+            except FileNotFoundError:
+                self._logManager.add_log("❌ Не найден Node.js (команда node)")
+                return
+            except subprocess.TimeoutExpired:
+                self._logManager.add_log(f"⏰ [{acc.login}] Таймаут отправки трейда (180с)")
+                continue
+            except Exception as exc:
+                self._logManager.add_log(f"❌ [{acc.login}] Ошибка отправки трейда: {exc}")
+                continue
+
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+
+            if result.returncode == 0:
+                sent_count = 0
+                for line in stdout.splitlines():
+                    if line.startswith("SENT_ITEMS_COUNT:"):
+                        try:
+                            sent_count = int(line.split(":", 1)[1].strip())
+                        except ValueError:
+                            sent_count = 0
+                        break
+
+                self._logManager.add_log(f"{acc.login} succesfull send trade: {sent_count}")
+                if callable(on_trade_sent):
+                    try:
+                        on_trade_sent(acc.login)
+                    except Exception:
+                        pass
+            elif result.returncode == 10:
+                self._logManager.add_log(f"{acc.login} inventory is empty")
+            else:
+                error_line = self._extract_looter_error(stdout, stderr)
+                if self._is_authorization_error(error_line):
+                    self._logManager.add_log(f"❌ [{acc.login}] Ошибка авторизации")
+                elif error_line:
+                    self._logManager.add_log(f"❌ [{acc.login}] Ошибка при отправке трейда: (проверьте на наличие блокировок)")
+                else:
+                    self._logManager.add_log(f"❌ [{acc.login}] Ошибка при отправке трейда (проверьте на наличие блокировок)")
+
+    def _run_install_command(self, cmd, cwd, timeout=300):
+        try:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+            )
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            self._logManager.add_log("❌ Установка зависимостей не успела завершиться (таймаут 300с)")
+            return False
+        except Exception as exc:
+            self._logManager.add_log(f"❌ Ошибка запуска установщика зависимостей: {exc}")
+            return False
+
+    def _install_looter_dependencies(self, script_dir):
+        attempted = []
+
+        install_commands = [
+            ["npm", "install", "--no-audit", "--no-fund"],
+            ["npm.cmd", "install", "--no-audit", "--no-fund"],
+            ["corepack", "npm", "install", "--no-audit", "--no-fund"],
+        ]
+
+        for cmd in install_commands:
+            attempted.append(" ".join(cmd))
+            result = self._run_install_command(cmd, script_dir)
+            if result is None:
+                continue
+            if result is False:
+                return False
+            return result
+
+        node_path = shutil.which("node")
+        if node_path:
+            node_dir = os.path.dirname(node_path)
+            npm_cli_candidates = [
+                os.path.join(node_dir, "node_modules", "npm", "bin", "npm-cli.js"),
+                os.path.join(node_dir, "..", "node_modules", "npm", "bin", "npm-cli.js"),
+                os.path.join(
+                    os.environ.get("ProgramFiles", "C:/Program Files"),
+                    "nodejs",
+                    "node_modules",
+                    "npm",
+                    "bin",
+                    "npm-cli.js",
+                ),
+            ]
+
+            for cli_path in npm_cli_candidates:
+                cli_path = os.path.abspath(cli_path)
+                if not os.path.isfile(cli_path):
+                    continue
+
+                cmd = ["node", cli_path, "install", "--no-audit", "--no-fund"]
+                attempted.append(" ".join(cmd))
+                result = self._run_install_command(cmd, script_dir)
+                if result is None:
+                    continue
+                if result is False:
+                    return False
+                return result
+
+        self._logManager.add_log("❌ Не удалось найти рабочий npm installer автоматически")
+        if attempted:
+            self._logManager.add_log("⚠️ Пробовал: " + " || ".join(attempted))
+        self._logManager.add_log("⚠️ Установите Node.js LTS (включая npm) и перезапустите приложение")
+        return None
+
+    def _ensure_looter_dependencies(self, script_dir):
+        package_json_path = os.path.join(script_dir, "package.json")
+        if not os.path.isfile(package_json_path):
+            self._logManager.add_log("❌ package.json для looter не найден. Переустановите сборку")
+            return False
+
+        steam_user_module = os.path.join(script_dir, "node_modules", "steam-user")
+        if os.path.isdir(steam_user_module):
+            return True
+
+        self._logManager.add_log("📦 Не найдены Node.js зависимости looter. Выполняю авто-установку...")
+
+        install_result = self._install_looter_dependencies(script_dir)
+        if install_result is None:
+            return False
+        if install_result is False:
+            return False
+
+        if install_result.returncode != 0:
+            stdout_tail = " | ".join((install_result.stdout or "").splitlines()[-8:])
+            stderr_tail = " | ".join((install_result.stderr or "").splitlines()[-8:])
+            self._logManager.add_log(f"❌ npm install завершился с code={install_result.returncode}")
+            if stdout_tail:
+                self._logManager.add_log(f"📄 npm stdout: {stdout_tail}")
+            if stderr_tail:
+                self._logManager.add_log(f"⚠️ npm stderr: {stderr_tail}")
+            return False
+
+        if not os.path.isdir(steam_user_module):
+            self._logManager.add_log("❌ После npm install модуль steam-user всё ещё отсутствует")
+            return False
+
+        self._logManager.add_log("✅ Node.js зависимости looter установлены")
+        return True
+
+    def _normalize_inventory_string(self, inventory_string):
+        pairs = []
+        normalized_raw = (
+            (inventory_string or "")
+            .replace(';', ',')
+            .replace('\n', ',')
+            .replace('\t', ',')
+            .replace(' ', ',')
+        )
+        for raw_pair in normalized_raw.split(','):
+            pair = raw_pair.strip()
+            if not pair:
+                continue
+
+            if pair == "400/2":
+                self._logManager.add_log("⚠️ Исправил appid 400/2 -> 440/2 (TF2)")
+                pair = "440/2"
+
+            if '/' not in pair:
+                self._logManager.add_log(f"⚠️ Пропущен некорректный inventory pair: {pair}")
+                continue
+
+            app_id, context_id = [v.strip() for v in pair.split('/', 1)]
+            if not app_id.isdigit() or not context_id.isdigit():
+                self._logManager.add_log(f"⚠️ Пропущен некорректный inventory pair: {pair}")
+                continue
+
+            normalized_pair = f"{app_id}/{context_id}"
+            if normalized_pair not in pairs:
+                pairs.append(normalized_pair)
+
+        return ','.join(pairs)
+
+
+# ===== Inlined from ui/control_frame.py =====
+import sys
+import customtkinter
+import os
+import psutil
+import ctypes
+import json
+import shutil
+import win32gui
+import win32process
+import win32con
+import time
+import threading
+import keyboard
+from Managers.AccountsManager import AccountManager
+from Managers.LogManager import LogManager
+from Managers.SettingsManager import SettingsManager
+
+
+class ControlFrame(customtkinter.CTkFrame):
+    def __init__(self, parent):
+        super().__init__(parent, width=250)
+        self.logManager = LogManager()
+        self.accounts_list_frame = None
+
+        self.grid(row=1, column=3, padx=(20, 20), pady=(20, 0), sticky="nsew")
+
+        data = [
+            ("Move all CS windows", None, self.move_all_cs_windows),
+            ("Kill ALL CS & Steam processes", "red", self.kill_all_cs_and_steam),
+            ("Launch BES", "darkgreen", self.launch_bes),
+            ("Launch SRT", "darkgreen", self.launch_srt),
+            ("Support Developer", "darkgreen", self.sendCasesMe),
+        ]
+
+        for text, color, func in data:
+            b = customtkinter.CTkButton(self, text=text, fg_color=color, command=func)
+            b.pack(pady=10)
+
+    def _load_runtime_maps(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        runtime_path = os.path.join(project_root, "runtime.json")
+
+        login_to_pid = {}
+        pid_to_login = {}
+
+        with open(runtime_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for item in data:
+            login = item.get("login")
+            cs2_pid = item.get("CS2Pid")
+            if not login or cs2_pid is None:
+                continue
+            try:
+                pid = int(cs2_pid)
+            except (TypeError, ValueError):
+                continue
+            login_to_pid[login] = pid
+            pid_to_login[pid] = login
+
+        return login_to_pid, pid_to_login
+
+    @staticmethod
+    def _get_active_cs2_pids():
+        pids = set()
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                if (proc.info.get("name") or "").lower() == "cs2.exe":
+                    pids.add(proc.info["pid"])
+            except Exception:
+                pass
+        return pids
+
+    def move_all_cs_windows(self):
+        print("🔀 Расстановка окон CS2 по порядку аккаунтов...")
+
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+        window_width = 383
+        window_height = 280
+        spacing = 0
+
+        # 1) Порядок строго из аккаунтов в UI
+        accounts_order = [acc.login for acc in AccountManager().accounts]
+        if not accounts_order:
+            print("❌ Список аккаунтов пуст")
+            return
+
+        # 2) runtime.json -> карты login<->pid
+        try:
+            login_to_pid, pid_to_login = self._load_runtime_maps()
+        except Exception as e:
+            print(f"❌ Ошибка чтения runtime.json: {e}")
+            return
+
+        print(f"✅ КАРТА runtime.json: {len(login_to_pid)} login→pid")
+
+        active_cs2_pids = self._get_active_cs2_pids()
+        if not active_cs2_pids:
+            print("❌ Активные cs2.exe процессы не найдены")
+            return
+
+        # 3) Ищем окна только для активных cs2 pid
+        hwnd_by_pid = {}
+
+        def enum_cb(hwnd, _):
+            try:
+                if not win32gui.IsWindowVisible(hwnd) or not win32gui.IsWindowEnabled(hwnd):
+                    return True
+                if win32gui.GetParent(hwnd) != 0:
+                    return True
+
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid not in active_cs2_pids:
+                    return True
+                if pid in hwnd_by_pid:
+                    return True
+
+                title = win32gui.GetWindowText(hwnd)
+                if not title:
+                    return True
+
+                hwnd_by_pid[pid] = hwnd
+
+                # по возможности нормализуем заголовок
+                login = pid_to_login.get(pid)
+                if login:
+                    try:
+                        win32gui.SetWindowText(hwnd, f"[FSN] {login}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(enum_cb, None)
+
+        # 4) Строим упорядоченный список окон строго по accounts_order
+        ordered_windows = []
+        for login in accounts_order:
+            pid = login_to_pid.get(login)
+            hwnd = hwnd_by_pid.get(pid)
+            if hwnd and win32gui.IsWindow(hwnd):
+                ordered_windows.append((login, pid, hwnd))
+
+        if not ordered_windows:
+            print("❌ Не найдено подходящих окон CS2 для расстановки")
+            return
+
+        # 5) Ставим в линию 1-2-3-4... по списку аккаунтов
+        placed = 0
+        for idx, (login, pid, hwnd) in enumerate(ordered_windows):
+            x = idx * (window_width + spacing)
+            y = 0
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                win32gui.MoveWindow(hwnd, x, y, window_width, window_height, True)
+                print(f"📍 {idx + 1}. {login} (PID {pid}) -> ({x},{y})")
+                placed += 1
+            except Exception as e:
+                print(f"⚠️ Не удалось переместить {login}: {e}")
+
+        print(f"✅ Размещено окон: {placed}")
+
+        if self.accounts_list_frame:
+            self.accounts_list_frame.set_green_for_launched_cs2(active_cs2_pids)
+
+    def check_cs2_and_update_colors(self):
+        launched_pids = self._get_active_cs2_pids()
+        if self.accounts_list_frame:
+            self.accounts_list_frame.set_green_for_launched_cs2(launched_pids)
+
+    def set_accounts_list_frame(self, frame):
+        self.accounts_list_frame = frame
+
+    def sendCasesMe(self):
+        os.system("start https://steamcommunity.com/tradeoffer/new/?partner=1820312068&token=IfT_ec3_")
+
+    def kill_all_cs_and_steam(self):
+        """💀 УБИВАЕТ ВСЕ CS2 & Steam процессы + ПРАВИЛЬНЫЕ ЦВЕТА (оранжевые НЕ трогаем!)"""
+        print("💀 УБИВАЮ ВСЕ CS2 & Steam процессы!")
+        killed = 0
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if "cs2" in name or "steam" in name or "csgo" in name:
+                    proc.kill()
+                    print(f"💀 [{proc.info['pid']}] {proc.info.get('name')}")
+                    killed += 1
+            except Exception:
+                pass
+        print(f"✅ УБИТО {killed} процессов!")
+
+        try:
+            account_manager = AccountManager()
+            for acc in account_manager.accounts:
+                if hasattr(acc, "steamProcess"):
+                    acc.steamProcess = None
+                if hasattr(acc, "CS2Process"):
+                    acc.CS2Process = None
+                if self.accounts_list_frame and self.accounts_list_frame.is_farmed_account(acc):
+                    acc.setColor("#ff9500")
+                elif self.accounts_list_frame and self.accounts_list_frame.is_drop_ready_account(acc):
+                    acc.setColor("#a855f7")
+                else:
+                    acc.setColor("#DCE4EE")
+        except Exception as e:
+            print(f"⚠️ Ошибка UI: {e}")
+
+        if self.accounts_list_frame:
+            self.accounts_list_frame.update_label()
+
+        self._clear_steam_userdata()
+
+    def _clear_steam_userdata(self):
+        settings_manager = SettingsManager()
+        steam_path = settings_manager.get("SteamPath", r"C:\\Program Files (x86)\\Steam\\steam.exe")
+        steam_dir = os.path.dirname(steam_path)
+        userdata_path = os.path.join(steam_dir, "userdata")
+        if not os.path.isdir(userdata_path):
+            print(f"⚠️ userdata папка не найдена: {userdata_path}")
+            return
+
+        removed = 0
+        for entry in os.listdir(userdata_path):
+            entry_path = os.path.join(userdata_path, entry)
+            try:
+                if os.path.isdir(entry_path):
+                    shutil.rmtree(entry_path, ignore_errors=True)
+                else:
+                    os.remove(entry_path)
+                removed += 1
+            except Exception as exc:
+                print(f"⚠️ Не удалось удалить {entry_path}: {exc}")
+
+        print(f"🧹 userdata очищена, удалено элементов: {removed}")
+
+    def launch_bes(self):
+        base_path = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(sys.argv[0]))
+        )
+        bes_path = os.path.join(base_path, "BES", "BES.exe")
+        if os.path.exists(bes_path):
+            try:
+                os.startfile(bes_path)
+                print("✅ BES запущен!")
+            except Exception as e:
+                print(f"❌ Ошибка BES: {e}")
+        else:
+            print(f"❌ BES.exe не найден: {bes_path}")
+
+    def launch_srt(self):
+        base_path = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(sys.argv[0]))
+        )
+        srt_path = os.path.join(base_path, "SteamRouteTool", "SteamRouteTool.exe")
+        if os.path.exists(srt_path):
+            try:
+                os.startfile(srt_path)
+                print("✅ SRT запущен!")
+            except Exception as e:
+                print(f"❌ Ошибка SRT: {e}")
+        else:
+            print(f"❌ SRT.exe не найден: {srt_path}")
+
+    def auto_move_after_4_cs2(self, delay=1, callback=None, cancel_check=None):
+        """Ждёт 4 окна CS2, двигает их, вызывает callback"""
+        threading.Thread(
+            target=self._wait_4_cs2_and_move,
+            args=(delay, callback, cancel_check),
+            daemon=True,
+        ).start()
+    def _press_ctrl_q(self):
+        try:
+            keyboard.press_and_release("ctrl+q")
+
+            return True
+        except Exception as e:
+            self.logManager.add_log(f"⚠️ AUTO: failed to press Ctrl+Q: {e}")
+            return False
+    def _wait_4_cs2_and_move(self, delay, callback, cancel_check):
+        """Внутренний метод ожидания + перемещения"""
+        print("👀 Ожидаю запуск 4 CS2...")
+
+        start_detect_time = None
+
+        while True:
+            if cancel_check and cancel_check():
+                self.logManager.add_log("🛑 Auto move отменён")
+                return
+
+            cs2_pids = list(self._get_active_cs2_pids())
+
+            if len(cs2_pids) >= 4:
+                if start_detect_time is None:
+                    start_detect_time = time.time()
+                    self.logManager.add_log(f"⏳ Найдено 4 CS2 → жду {delay} сек")
+                elif time.time() - start_detect_time >= delay:
+                    if cancel_check and cancel_check():
+                        self.logManager.add_log("🛑 Auto move отменён")
+                        return
+
+                    self.logManager.add_log("🚀 Таймер истёк → Make lobbies + Start Game")
+                    self.move_all_cs_windows()
+
+
+
+                    self._press_ctrl_q()
+                    if callback:
+                        try:
+                            if cancel_check and cancel_check():
+                                self.logManager.add_log("🛑 Callback отменён")
+                                return
+                            callback()
+                        except Exception as e:
+                            self.logManager.add_log(f"❌ Callback error: {e}")
+                    return
+            else:
+                start_detect_time = None
+
+            time.sleep(2)
+
+
+# ===== Inlined from ui/main_menu.py =====
+import customtkinter
+import threading
+import time
+import keyboard
+
+from Managers.AccountsManager import AccountManager
+from Managers.LobbyManager import LobbyManager
+from Managers.LogManager import LogManager
+from Managers.SettingsManager import SettingsManager
+from Modules.AutoAcceptModule import AutoAcceptModule
+
+
+class MainMenu(customtkinter.CTkTabview):
+    def __init__(self, parent):
+        super().__init__(parent, width=250)
+        self.grid(row=0, column=2, padx=(20, 0), pady=(0, 0), sticky="nsew")
+
+        self._create_main_tab()
+
+        self._logManager = LogManager()
+        self._accountManager = AccountManager()
+        self._lobbyManager = LobbyManager()
+        self._settingsManager = SettingsManager()
+        self.auto_accept_module = AutoAcceptModule()
+
+        auto_accept_enabled = bool(self._settingsManager.get("AutoAcceptEnabled", True))
+        if auto_accept_enabled:
+            self.auto_accept_module.start()
+            print("🚀 AutoAcceptModule: АВТОЗАПУСК ✓")
+
+        self._create_buttons([
+            ("Make lobbies", "darkgreen", self.make_lobbies),
+            ("Disband lobbies", "darkblue", self.disband_lobbies),
+            ("Shuffle lobbies", "darkblue", self.shuffle_lobbies),
+            ("Make lobbies & Search game", "purple", self.make_lobbies_and_search_game),
+        ])
+
+        self._create_toggle("Auto Accept Game", self.toggle_auto_accept, default_value=auto_accept_enabled)
+
+        self._cancel_requested = False
+        self._hotkey_registered = False
+        self._active_action_name = None
+        self._cancel_notified_for_action = None
+        self._last_hotkey_ts = 0.0
+        self._register_global_cancel_hotkey()
+
+    def _create_main_tab(self):
+        self.add("Main Menu")
+        self.tab("Main Menu").grid_columnconfigure(0, weight=1)
+
+    def _create_buttons(self, buttons_data):
+        self.buttons = {}
+        for i, (text, color, command) in enumerate(buttons_data):
+            button = customtkinter.CTkButton(
+                self.tab("Main Menu"),
+                text=text,
+                fg_color=color,
+                command=command
+            )
+            button.grid(row=i, column=0, padx=20, pady=10, sticky="ew")
+            self.buttons[text] = button
+
+    def _create_toggle(self, text, command, default_value=False):
+        self.toggles = getattr(self, "toggles", {})
+        toggle = customtkinter.CTkSwitch(
+            self.tab("Main Menu"),
+            text=text,
+            command=command
+        )
+        toggle.grid(row=len(self.buttons) + len(self.toggles), column=0, padx=20, pady=10)
+        if default_value:
+            toggle.select()
+        else:
+            toggle.deselect()
+        self.toggles[text] = toggle
+
+    def _register_global_cancel_hotkey(self):
+        if self._hotkey_registered:
+            return
+        try:
+            keyboard.add_hotkey('ctrl+q', self._on_global_cancel_hotkey)
+            self._hotkey_registered = True
+            print("✅ Global Ctrl+Q hotkey registered")
+        except Exception as e:
+            print(f"⚠️ Cannot register global Ctrl+Q hotkey: {e}")
+
+    def _on_global_cancel_hotkey(self):
+        # анти-флуд: suppress key-repeat storms
+        now = time.time()
+        if now - self._last_hotkey_ts < 0.25:
+            return
+        self._last_hotkey_ts = now
+        self._cancel_requested = True
+
+    def _is_cancelled(self):
+        if self._cancel_requested:
+            return True
+        try:
+            return keyboard.is_pressed('ctrl+q')
+        except Exception:
+            return False
+
+    def _format_cancel_message(self, action_name):
+        mapping = {
+            "Make lobbies": "Make lobbies",
+            "Disband lobbies": "Disband lobbies",
+            "Shuffle lobbies": "Shuffle lobbies",
+            "Make lobbies & Search game": "Make lobbies & Search game",
+        }
+        return mapping.get(action_name or "", "Canceled action")
+
+    def _notify_cancel_once(self, action_name):
+        if self._cancel_notified_for_action == action_name:
+            return
+        self._cancel_notified_for_action = action_name
+        msg = self._format_cancel_message(action_name)
+        try:
+            self._logManager.add_log(msg)
+        except Exception:
+            pass
+        print(f"🛑 {msg}")
+
+    def toggle_auto_accept(self):
+        self.auto_accept_module.toggle()
+        status = 'ON' if self.auto_accept_module._running else 'OFF'
+        print(f"🔄 Auto Accept Game: {status}")
+        self._lobbyManager.auto_accept = self.auto_accept_module._running
+        self._settingsManager.set("AutoAcceptEnabled", self.auto_accept_module._running)
+    def _set_all_buttons_state(self, state):
+        for button in self.buttons.values():
+            try:
+                button.configure(state=state)
+            except Exception:
+                pass
+    # -----------------------------
+    # Universal countdown runner on button
+    # -----------------------------
+    def run_with_countdown_on_button(
+        self,
+        button_text,
+        action,
+        message="Completed",
+        message_in_run="Running...",
+        countdown=3,
+        message_time=1
+    ):
+        button = self.buttons.get(button_text)
+        if not button:
+            return
+
+        original_text = button.cget("text")
+        self._active_action_name = button_text
+        self._cancel_notified_for_action = None
+        self._cancel_requested = False
+        self._set_all_buttons_state("disabled")
+        self._countdown_step(button, action, original_text, countdown, message, message_in_run, message_time)
+
+    def _countdown_step(self, button, action, original_text, seconds, message, message_in_run, message_time):
+        if self._is_cancelled():
+            self._notify_cancel_once(self._active_action_name)
+            button.configure(text=self._format_cancel_message(self._active_action_name), state="disabled")
+            self.after(message_time * 1000, lambda: self._reset_button_text(button, original_text))
+            return
+
+        if seconds > 0:
+            button.configure(text=f"{seconds}...")
+            self.after(1000, lambda: self._countdown_step(
+                button, action, original_text, seconds - 1, message, message_in_run, message_time
+            ))
+        else:
+            button.configure(text=message_in_run)
+            self.after(100, lambda: self._run_action_on_button(
+                button, action, original_text, message, message_time
+            ))
+
+    def _run_action_on_button(self, button, action, original_text, message, message_time):
+        def worker():
+            ok = False
+            cancelled = False
+            try:
+
+                if self._is_cancelled():
+                    cancelled = True
+                else:
+                    res = action()
+                    ok = bool(res) if res is not None else True
+                    if not ok and self._is_cancelled():
+                        cancelled = True
+            except Exception as e:
+                print(f"❌ Action error: {e}")
+                ok = False
+
+            def ui_done():
+
+                if cancelled:
+                    self._notify_cancel_once(self._active_action_name)
+                    button.configure(text=self._format_cancel_message(self._active_action_name), state="disabled")
+                else:
+                    button.configure(text=message if ok else "Failed", state="disabled")
+                self.after(message_time * 1000, lambda: self._reset_button_text(button, original_text))
+
+            self.after(0, ui_done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _reset_button_text(self, button, original_text):
+        button.configure(text=original_text)
+        self._set_all_buttons_state("normal")
+        self._active_action_name = None
+
+    # -----------------------------
+    # Button actions
+    # -----------------------------
+    def make_lobbies(self):
+        self.run_with_countdown_on_button(
+            button_text="Make lobbies",
+            action=self._lobbyManager.CollectLobby,
+            message="Completed",
+            message_in_run="Collecting lobbies...",
+            countdown=3,
+            message_time=1
+        )
+
+    def disband_lobbies(self):
+        self.run_with_countdown_on_button(
+            button_text="Disband lobbies",
+            action=self._lobbyManager.DisbandLobbies,
+            message="Completed",
+            message_in_run="Disbanding lobbies...",
+            countdown=1,
+            message_time=1
+        )
+
+    def shuffle_lobbies(self):
+
+        self.run_with_countdown_on_button(
+            button_text="Shuffle lobbies",
+            action=self._lobbyManager.Shuffle,
+            message="Completed",
+            message_in_run="Shuffling lobbies...",
+            countdown=1,
+            message_time=1
+        )
+
+    def make_lobbies_and_search_game(self):
+        self.run_with_countdown_on_button(
+            button_text="Make lobbies & Search game",
+            action=self._lobbyManager.MakeLobbiesAndSearchGame,
+            message="Completed",
+            message_in_run="Making lobbies & Search",
+            countdown=3,
+            message_time=1
+        )
+
+    def trigger_make_lobbies_and_search_game_auto(self):
+        """Надёжно имитирует клик по кнопке Main Menu для авто-сценария."""
+        button_text = "Make lobbies & Search game"
+        button = self.buttons.get(button_text)
+        if not button:
+            self._logManager.add_log("❌ Main Menu button not found: Make lobbies & Search game")
+            return False
+
+        try:
+            if str(button.cget("state")) == "disabled":
+                self._logManager.add_log("⚠️ Main Menu button is disabled: Make lobbies & Search game")
+                return False
+        except Exception:
+            pass
+
+        try:
+            button.invoke()
+            return True
+        except Exception as e:
+            self._logManager.add_log(f"❌ Button invoke error: {e}")
+            return False
+
+
+# ===== Inlined from ui/sidebar.py =====
+import customtkinter
+
+class Sidebar(customtkinter.CTkFrame):
+    def __init__(self, parent):
+        super().__init__(parent, width=140, corner_radius=0)
+        self.grid(row=0, column=0, rowspan=4, sticky="nsew")
+        self.grid_rowconfigure(4, weight=1)
+
+        self.logo_label = customtkinter.CTkLabel(self, text="Actuality 23.02", font=customtkinter.CTkFont(size=20, weight="bold"))
+        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
+
+        self.version_label = customtkinter.CTkLabel(self, text="Beta Replic Panel", font=customtkinter.CTkFont(size=20, weight="bold"))
+        self.version_label.grid(row=1, column=0, padx=20, pady=(20, 10))
+
+        self.appearance_mode_label = customtkinter.CTkLabel(self, text="Appearance Mode:", anchor="w")
+        self.appearance_mode_label.grid(row=5, column=0, padx=20, pady=(10, 0))
+
+        self.appearance_mode_optionemenu = customtkinter.CTkOptionMenu(self, values=["Light","Dark","System"], command=self.change_appearance_mode)
+        self.appearance_mode_optionemenu.grid(row=6, column=0, padx=20, pady=(10, 10))
+
+        self.scaling_label = customtkinter.CTkLabel(self, text="UI Scaling:", anchor="w")
+        self.scaling_label.grid(row=7, column=0, padx=20, pady=(10, 0))
+
+        self.scaling_optionemenu = customtkinter.CTkOptionMenu(self, values=["80%","90%","100%","110%","120%"], command=self.change_scaling)
+        self.scaling_optionemenu.grid(row=8, column=0, padx=20, pady=(10, 20))
+
+    def set_defaults(self):
+        self.appearance_mode_optionemenu.set("Dark")
+        self.scaling_optionemenu.set("100%")
+
+    def change_appearance_mode(self, mode):
+        customtkinter.set_appearance_mode(mode)
+
+    def change_scaling(self, value):
+        customtkinter.set_widget_scaling(int(value.replace("%",""))/100)
