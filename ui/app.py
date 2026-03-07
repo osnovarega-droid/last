@@ -54,7 +54,7 @@ CIH7SOA4o8D88FHEVANm5rcseeMq9LND9z7aOJ+CEdxyjN8lb+CZ9xGKGl/8+UG+
 rwIDAQAB
 -----END PUBLIC KEY-----"""
 LICENSE_CACHE_PATH = Path("settings/license_cache.json")
-LICENSE_TOKEN_TTL_GRACE_SECONDS = 5
+LICENSE_TOKEN_TTL_GRACE_SECONDS = 300
 LICENSE_RECHECK_INTERVAL_MS = 60000
 LICENSE_REQUEST_TIMEOUT = (3, 8)
 LICENSE_WATCHDOG_TIMEOUT_MS = 25000
@@ -241,13 +241,15 @@ class App(customtkinter.CTk):
             raise
 
         def on_done(done_future):
-            if not self.winfo_exists():
+            if not done_callback:
                 return
-            if done_callback:
+            try:
+                self._queue_ui_action(lambda: done_callback(done_future))
+            except Exception as exc:
                 try:
-                    self.after(0, lambda: done_callback(done_future))
-                except Exception as exc:
-                    self.after(0, lambda: self.log_manager.add_log(f"❌ done_callback scheduling failed: {exc}"))
+                    self._queue_ui_action(lambda: self.log_manager.add_log(f"❌ done_callback scheduling failed: {exc}"))
+                except Exception:
+                    pass
 
         future.add_done_callback(on_done)
         return future
@@ -563,7 +565,7 @@ class App(customtkinter.CTk):
             ("Disband lobbies", self._action_disband_lobbies, BG_CARD_ALT),
             ("Get level", self._action_try_get_level, BG_CARD_ALT),
             ("Shuffle Lobbies", self._action_shuffle_lobbies, BG_CARD_ALT),
-            ("Support Developer", self._action_support_developer, BG_CARD_ALT),
+            ("Get wingman rank", self._action_try_get_wingman_rank, BG_CARD_ALT),
         ]
         for idx, (text, cmd, color) in enumerate(lobby_buttons):
             r, c = divmod(idx, 2)
@@ -1090,6 +1092,13 @@ class App(customtkinter.CTk):
         iat = int(payload.get("iat", 0))
         exp = int(payload.get("exp", 0))
 
+        # Некоторые серверы лицензий возвращают unix-время в миллисекундах.
+        # Нормализуем к секундам, чтобы не отклонять валидные токены.
+        if iat > 10**12:
+            iat //= 1000
+        if exp > 10**12:
+            exp //= 1000
+
         if payload.get("hwid") != expected_hwid:
             raise ValueError("HWID в токене не совпадает с устройством")
         if expected_nonce and payload.get("nonce") != expected_nonce:
@@ -1209,6 +1218,7 @@ class App(customtkinter.CTk):
         self._background_license_check_in_flight = False
 
         if future.exception():
+            self.log_manager.add_log(f"⚠️ Автопроверка: ошибка проверки лицензии: {future.exception()}")
             self._apply_license_result(False, "Проверьте лицензию: запись не найдена или недоступна в БД")
             self.log_manager.add_log("⚠️ Автопроверка: лицензия не подтверждена в БД. Доступ ограничен до раздела License.")
             return
@@ -1241,11 +1251,14 @@ class App(customtkinter.CTk):
         self.is_unlocked = is_valid
 
         if is_valid:
+            status_text = "Статус: Лицензия подтверждена"
+            if message:
+                status_text = f"{status_text} ({message})"
             try:
-                self.license_status.configure(text="Статус: Лицензия подтверждена", text_color=ACCENT_GREEN)
+                self.license_status.configure(text=status_text, text_color=ACCENT_GREEN)
             except Exception:
                 pass
-            self.log_manager.add_log("✅ Лицензия подтверждена сервером!")
+            self.log_manager.add_log(f"✅ Лицензия подтверждена сервером! {message}")
             self.show_section(self._pending_section or "license")
         else:
             try:
@@ -1363,10 +1376,10 @@ class App(customtkinter.CTk):
             return
         self._run_action_async(self.control_frame.launch_bes)
 
-    def _action_support_developer(self):
+    def _action_try_get_wingman_rank(self):
         if not self._ensure_license():
             return
-        self._run_action_async(self.control_frame.sendCasesMe)
+        self._run_action_async(self.accounts_control.try_get_wingmanRank)
 
     def _action_send_trade_selected(self):
         if not self._ensure_license():
