@@ -1,3 +1,7 @@
+
+from datetime import datetime
+
+
 class LogManager:
     _instance = None
 
@@ -19,7 +23,8 @@ class LogManager:
             self._initialized = True
 
     def add_log(self, message):
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
         self.textbox.configure(state="normal")
-        self.textbox.insert("end", f"{message}\n")
+        self.textbox.insert("end", f"{timestamp} {message}\n")
         self.textbox.see("end")  # прокрутка вниз
         self.textbox.configure(state="disabled")
