@@ -2821,11 +2821,8 @@ class AccountsControl(customtkinter.CTkTabview):
                     skill = int(skill) if skill.isdigit() else -1
                     self._logManager.add_log(f"[{acc.login}] Wingman: W:{wins} T:{ties} L:{losses} R:{skill}")
 
-                    parsed = True
-                    break
-
-                if not parsed:
-                    self._logManager.add_log(f"[{acc.login}] Ошибка парснига")
+                else:
+                    self._logManager.add_log(f"[{acc.login}] ⚠ Wingman статистика не найдена")
         self._run_stat_with_lock(worker)
 
     def try_get_mapStats(self):
